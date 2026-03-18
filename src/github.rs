@@ -160,7 +160,7 @@ fn make_query(search_filter: &str, fields: &str, cursor: Option<&str>) -> String
     };
     format!(
         r#"query {{
-  search(query: "{}", type: ISSUE, first: 50{}) {{
+  search(query: "{}", type: ISSUE, first: 25{}) {{
     pageInfo {{ hasNextPage endCursor }}
     nodes {{
       ... on PullRequest {{
@@ -179,17 +179,35 @@ async fn run_query(search_filter: &str, fields: &str) -> Result<Vec<GqlPr>, Box<
 
     loop {
         let query = make_query(search_filter, fields, cursor.as_deref());
-        let output = tokio::process::Command::new("gh")
-            .args(["api", "graphql", "-f", &format!("query={}", query)])
-            .output()
-            .await?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("GraphQL query failed: {}", stderr).into());
+        let mut last_err = None;
+        let mut resp = None;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                eprintln!("Retrying GraphQL query (attempt {})", attempt + 1);
+            }
+            let output = tokio::process::Command::new("gh")
+                .args(["api", "graphql", "-f", &format!("query={}", query)])
+                .output()
+                .await?;
+
+            if !output.status.success() {
+                last_err = Some(String::from_utf8_lossy(&output.stderr).to_string());
+                continue;
+            }
+
+            match serde_json::from_slice::<GqlResponse>(&output.stdout) {
+                Ok(r) => { resp = Some(r); break; }
+                Err(e) => { last_err = Some(format!("JSON parse error: {}", e)); continue; }
+            }
         }
 
-        let resp: GqlResponse = serde_json::from_slice(&output.stdout)?;
+        let resp = match resp {
+            Some(r) => r,
+            None => return Err(format!("GraphQL query failed after 3 attempts: {}", last_err.unwrap_or_default()).into()),
+        };
+
         all_nodes.extend(resp.data.search.nodes);
 
         if resp.data.search.page_info.has_next_page {
@@ -252,10 +270,13 @@ async fn check_ci_approval_needed(repo: &str, head_sha: &str) -> bool {
     }
 }
 
-pub async fn fetch_all_prs() -> Result<FetchResult, Box<dyn std::error::Error + Send + Sync>> {
+pub async fn fetch_all_prs(user: &str) -> Result<FetchResult, Box<dyn std::error::Error + Send + Sync>> {
+    let user_filter = if user.is_empty() { "@me".to_string() } else { user.to_string() };
+    let my_query = format!("is:pr is:open author:{}", user_filter);
+    let review_query = format!("is:pr is:open review-requested:{}", user_filter);
     let (my_nodes, review_nodes) = tokio::try_join!(
-        run_query("is:pr is:open author:@me", MY_PR_FIELDS),
-        run_query("is:pr is:open review-requested:@me", REVIEW_PR_FIELDS),
+        run_query(&my_query, MY_PR_FIELDS),
+        run_query(&review_query, REVIEW_PR_FIELDS),
     )?;
 
     let mut review_prs = convert_prs(&review_nodes);

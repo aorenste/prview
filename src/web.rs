@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use actix_web::{HttpResponse, get, post, web};
@@ -10,7 +11,8 @@ use crate::worker::UpdateBatch;
 
 pub type Db = web::Data<Arc<Mutex<Connection>>>;
 pub type Tx = web::Data<broadcast::Sender<UpdateBatch>>;
-pub type Nudge = web::Data<Arc<tokio::sync::Notify>>;
+pub type Nudge = web::Data<Arc<std::sync::atomic::AtomicBool>>;
+pub type ActiveUsers = web::Data<Arc<Mutex<HashMap<String, usize>>>>;
 
 pub fn build_hash() -> String {
     use std::hash::{Hash, Hasher};
@@ -31,6 +33,7 @@ struct InitPayload {
 
 #[derive(Deserialize)]
 struct ToggleRequest {
+    user: Option<String>,
     repo: String,
     number: i64,
     hidden: bool,
@@ -38,9 +41,15 @@ struct ToggleRequest {
 
 #[derive(Deserialize)]
 struct ToggleReadRequest {
+    user: Option<String>,
     repo: String,
     number: i64,
     read: bool,
+}
+
+#[derive(Deserialize)]
+struct UserQuery {
+    user: Option<String>,
 }
 
 #[get("/")]
@@ -51,12 +60,28 @@ pub async fn index() -> HttpResponse {
 }
 
 #[get("/api/events")]
-pub async fn events(db: Db, tx: Tx, hash: BuildHash) -> HttpResponse {
+pub async fn events(
+    db: Db,
+    tx: Tx,
+    hash: BuildHash,
+    active_users: ActiveUsers,
+    query: web::Query<UserQuery>,
+) -> HttpResponse {
+    let user = query.user.clone().unwrap_or_default();
+
+    // Register this user so the worker fetches for them
+    {
+        let mut map = active_users.lock().unwrap();
+        *map.entry(user.clone()).or_insert(0) += 1;
+    }
+    let active_users_clone = active_users.clone().into_inner();
+    let user_for_drop = user.clone();
+
     let (init_data, mut rx) = {
         let conn = db.lock().unwrap();
-        let prs = db::list_prs(&conn, true);
-        let review_prs = db::list_review_prs(&conn);
-        let hidden_count = db::hidden_count(&conn);
+        let prs = db::list_prs(&conn, true, &user);
+        let review_prs = db::list_review_prs(&conn, &user);
+        let hidden_count = db::hidden_count(&conn, &user);
         let init = InitPayload { build_hash: hash.as_ref().clone(), prs, review_prs, hidden_count };
         (serde_json::to_string(&init).unwrap(), tx.subscribe())
     };
@@ -72,6 +97,10 @@ pub async fn events(db: Db, tx: Tx, hash: BuildHash) -> HttpResponse {
         loop {
             match rx.recv().await {
                 Ok(batch) => {
+                    // Only forward updates for this user
+                    if batch.target_user != user {
+                        continue;
+                    }
                     // Inject build_hash into the update JSON
                     if let Ok(mut json) = serde_json::to_value(&batch) {
                         json["build_hash"] = serde_json::Value::String(stream_hash.clone());
@@ -82,10 +111,17 @@ pub async fn events(db: Db, tx: Tx, hash: BuildHash) -> HttpResponse {
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     eprintln!("SSE client lagged, missed {} messages", n);
-                    // Send a full refresh
-                    // Client should reconnect to get full state
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+
+        // Unregister this user when SSE disconnects
+        let mut map = active_users_clone.lock().unwrap();
+        if let Some(count) = map.get_mut(&user_for_drop) {
+            *count -= 1;
+            if *count == 0 {
+                map.remove(&user_for_drop);
             }
         }
     };
@@ -99,23 +135,25 @@ pub async fn events(db: Db, tx: Tx, hash: BuildHash) -> HttpResponse {
 
 #[post("/api/toggle-hidden")]
 pub async fn api_toggle_hidden(db: Db, tx: Tx, body: web::Json<ToggleRequest>) -> HttpResponse {
+    let user = body.user.clone().unwrap_or_default();
     let hidden_val: i64 = if body.hidden { 1 } else { 0 };
     let pr = {
         let conn = db.lock().unwrap();
-        db::set_hidden(&conn, &body.repo, body.number, hidden_val);
-        db::get_pr(&conn, &body.repo, body.number)
+        db::set_hidden(&conn, &body.repo, body.number, hidden_val, &user);
+        db::get_pr(&conn, &body.repo, body.number, &user)
     };
 
-    // Broadcast the change to all SSE clients
     if let Some(pr) = pr {
         let hidden_count = {
             let conn = db.lock().unwrap();
-            db::hidden_count(&conn)
+            db::hidden_count(&conn, &user)
         };
         let batch = UpdateBatch {
+            target_user: user,
             pr_updates: vec![crate::worker::PrUpdate::Changed(pr)],
             review_updates: vec![],
             hidden_count,
+            error: None,
         };
         let _ = tx.send(batch);
     }
@@ -125,21 +163,24 @@ pub async fn api_toggle_hidden(db: Db, tx: Tx, body: web::Json<ToggleRequest>) -
 
 #[post("/api/toggle-review-read")]
 pub async fn api_toggle_review_read(db: Db, tx: Tx, body: web::Json<ToggleReadRequest>) -> HttpResponse {
+    let user = body.user.clone().unwrap_or_default();
     let review_pr = {
         let conn = db.lock().unwrap();
-        db::set_review_read(&conn, &body.repo, body.number, body.read);
-        db::get_review_pr(&conn, &body.repo, body.number)
+        db::set_review_read(&conn, &body.repo, body.number, body.read, &user);
+        db::get_review_pr(&conn, &body.repo, body.number, &user)
     };
 
     if let Some(pr) = review_pr {
         let hidden_count = {
             let conn = db.lock().unwrap();
-            db::hidden_count(&conn)
+            db::hidden_count(&conn, &user)
         };
         let batch = UpdateBatch {
+            target_user: user,
             pr_updates: vec![],
             review_updates: vec![crate::worker::ReviewPrUpdate::Changed(pr)],
             hidden_count,
+            error: None,
         };
         let _ = tx.send(batch);
     }
@@ -149,7 +190,16 @@ pub async fn api_toggle_review_read(db: Db, tx: Tx, body: web::Json<ToggleReadRe
 
 #[post("/api/refresh")]
 pub async fn api_refresh(nudge: Nudge) -> HttpResponse {
-    nudge.notify_one();
+    nudge.store(true, std::sync::atomic::Ordering::Relaxed);
+    HttpResponse::Ok().json(serde_json::json!({"ok": true}))
+}
+
+#[post("/api/set-user")]
+pub async fn api_set_user(
+    nudge: Nudge,
+) -> HttpResponse {
+    // Just nudge — the SSE reconnect will register the user
+    nudge.store(true, std::sync::atomic::Ordering::Relaxed);
     HttpResponse::Ok().json(serde_json::json!({"ok": true}))
 }
 
@@ -192,7 +242,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
   }
 
   /* Connection error banner */
-  #conn-error {
+  #conn-error, #fetch-error {
     display: none;
     background: var(--red-bg);
     border: 1px solid var(--red);
@@ -205,6 +255,11 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
     z-index: 100;
     border-radius: 8px;
     margin-bottom: 16px;
+  }
+  #fetch-error {
+    background: var(--yellow-bg);
+    border-color: var(--yellow);
+    color: var(--yellow);
   }
 
   /* Header */
@@ -498,14 +553,43 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
     color: var(--accent);
     border-color: var(--accent);
   }
+
+  /* User toggle */
+  .user-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+  }
+  .user-input {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.85em;
+    padding: 5px 10px;
+    border-radius: 8px;
+    width: 130px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .user-input:focus { border-color: var(--accent); }
+  .user-input.active-user { border-color: var(--accent); color: var(--accent); }
 </style>
 </head>
 <body>
 <div id="conn-error">Unable to reach server</div>
+<div id="fetch-error"></div>
 <div class="header">
   <h1>PRView</h1>
   <span class="badge">Live</span>
   <button id="refresh-btn" class="refresh-btn" onclick="refreshNow()" title="Refresh now">&#x21bb;</button>
+  <div class="user-toggle">
+    <button class="chip active" id="user-me-btn" onclick="setUser('')">me</button>
+    <input type="text" id="user-input" class="user-input" placeholder="username" spellcheck="false" autocomplete="off"
+           onfocus="this.select()"
+           onkeydown="if(event.key==='Enter'){setUser(this.value);this.blur();}">
+  </div>
 </div>
 <div class="tabs">
   <button class="tab active" data-tab="my-prs">My Open PRs <span class="tab-count" id="my-prs-count">0</span></button>
@@ -560,6 +644,7 @@ let buildHash = null;
 let allPrs = [];
 let allReviewPrs = [];
 let hiddenCount = 0;
+let hasFetched = false;
 
 // Persist toggle state in localStorage
 function loadPref(key, fallback) {
@@ -705,7 +790,8 @@ function renderMyPrs() {
   document.getElementById('my-prs-count').textContent = allPrs.filter(p => !p.hidden).length;
 
   if (visible.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No PRs found yet (fetching in background...)</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="empty-state">' +
+      (hasFetched ? 'No open PRs' : 'Fetching...') + '</td></tr>';
     return;
   }
 
@@ -784,7 +870,8 @@ function renderReviews() {
   countEl.classList.toggle('attention', unreadCount > 5);
 
   if (visible.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No review requests found</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" class="empty-state">' +
+      (hasFetched ? 'No review requests' : 'Fetching...') + '</td></tr>';
     return;
   }
 
@@ -822,6 +909,15 @@ function renderAll() {
 
 // --- Updates ---
 function applyUpdate(batch) {
+  const fetchErr = document.getElementById('fetch-error');
+  if (batch.error) {
+    fetchErr.textContent = 'Fetch error: ' + batch.error;
+    fetchErr.style.display = 'block';
+    return;
+  }
+  fetchErr.style.display = 'none';
+  hasFetched = true;
+
   hiddenCount = batch.hidden_count;
 
   for (const u of batch.pr_updates) {
@@ -858,7 +954,7 @@ function toggleHidden(repo, number, hidden) {
   fetch('/api/toggle-hidden', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({repo, number, hidden}),
+    body: JSON.stringify({user: currentUser, repo, number, hidden}),
   });
   const key = repo + '#' + number;
   const pr = allPrs.find(p => prKey(p) === key);
@@ -887,7 +983,7 @@ function setReviewRead(e, repo, number, read) {
   fetch('/api/toggle-review-read', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({repo, number, read}),
+    body: JSON.stringify({user: currentUser, repo, number, read}),
   });
   const key = repo + '#' + number;
   const pr = allReviewPrs.find(p => prKey(p) === key);
@@ -904,11 +1000,36 @@ function markRead(repo, number) {
     fetch('/api/toggle-review-read', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({repo, number, read: true}),
+      body: JSON.stringify({user: currentUser, repo, number, read: true}),
     });
     pr.is_read = true;
     renderReviews();
   }
+}
+
+let currentUser = '';
+
+function setUser(user) {
+  user = user.trim();
+  currentUser = user;
+  const meBtn = document.getElementById('user-me-btn');
+  const input = document.getElementById('user-input');
+  if (user === '') {
+    meBtn.classList.add('active');
+    input.classList.remove('active-user');
+    input.value = '';
+  } else {
+    meBtn.classList.remove('active');
+    input.classList.add('active-user');
+    input.value = user;
+  }
+  allPrs = [];
+  allReviewPrs = [];
+  hiddenCount = 0;
+  hasFetched = false;
+  renderAll();
+  fetch('/api/set-user', { method: 'POST' });
+  connectSSE();
 }
 
 function refreshNow() {
@@ -919,7 +1040,7 @@ function refreshNow() {
 }
 
 // --- SSE ---
-const evtSource = new EventSource('/api/events');
+let evtSource = null;
 
 function checkBuildHash(hash) {
   if (buildHash === null) {
@@ -929,26 +1050,35 @@ function checkBuildHash(hash) {
   }
 }
 
-evtSource.addEventListener('init', (e) => {
-  document.getElementById('conn-error').style.display = 'none';
-  const data = JSON.parse(e.data);
-  checkBuildHash(data.build_hash);
-  allPrs = data.prs;
-  allReviewPrs = data.review_prs;
-  hiddenCount = data.hidden_count;
-  renderAll();
-});
+function connectSSE() {
+  if (evtSource) evtSource.close();
+  const params = currentUser ? '?user=' + encodeURIComponent(currentUser) : '';
+  evtSource = new EventSource('/api/events' + params);
 
-evtSource.addEventListener('update', (e) => {
-  document.getElementById('conn-error').style.display = 'none';
-  const batch = JSON.parse(e.data);
-  checkBuildHash(batch.build_hash);
-  applyUpdate(batch);
-});
+  evtSource.addEventListener('init', (e) => {
+    document.getElementById('conn-error').style.display = 'none';
+    const data = JSON.parse(e.data);
+    checkBuildHash(data.build_hash);
+    allPrs = data.prs;
+    allReviewPrs = data.review_prs;
+    hiddenCount = data.hidden_count;
+    hasFetched = (allPrs.length > 0 || allReviewPrs.length > 0);
+    renderAll();
+  });
 
-evtSource.onerror = () => {
-  document.getElementById('conn-error').style.display = 'block';
-};
+  evtSource.addEventListener('update', (e) => {
+    document.getElementById('conn-error').style.display = 'none';
+    const batch = JSON.parse(e.data);
+    checkBuildHash(batch.build_hash);
+    applyUpdate(batch);
+  });
+
+  evtSource.onerror = () => {
+    document.getElementById('conn-error').style.display = 'block';
+  };
+}
+
+connectSSE();
 </script>
 </body>
 </html>

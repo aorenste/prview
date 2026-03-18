@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rusqlite::Connection;
 use tokio::sync::broadcast;
@@ -27,28 +28,69 @@ pub enum ReviewPrUpdate {
 
 #[derive(Clone, serde::Serialize)]
 pub struct UpdateBatch {
+    pub target_user: String,
     pub pr_updates: Vec<PrUpdate>,
     pub review_updates: Vec<ReviewPrUpdate>,
     pub hidden_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 pub async fn fetch_prs_loop(
     db: Arc<Mutex<Connection>>,
     interval: std::time::Duration,
     tx: broadcast::Sender<UpdateBatch>,
-    nudge: Arc<tokio::sync::Notify>,
+    nudge: Arc<AtomicBool>,
+    active_users: Arc<Mutex<HashMap<String, usize>>>,
 ) {
     loop {
-        match fetch_and_store(&db, &tx).await {
-            Ok((my_count, review_count)) => {
-                eprintln!("Fetched {} open PRs, {} review-requested PRs", my_count, review_count)
+        nudge.store(false, Ordering::Relaxed);
+
+        let users: Vec<String> = {
+            let map = active_users.lock().unwrap();
+            if map.is_empty() {
+                vec![String::new()] // default to @me
+            } else {
+                map.keys().cloned().collect()
             }
-            Err(e) => eprintln!("Error fetching PRs: {}", e),
+        };
+
+        for user in &users {
+            match fetch_and_store(&db, &tx, user).await {
+                Ok((my_count, review_count)) => {
+                    eprintln!("[{}] Fetched {} open PRs, {} review-requested PRs",
+                        if user.is_empty() { "@me" } else { user }, my_count, review_count);
+                }
+                Err(e) => {
+                    eprintln!("[{}] Error fetching PRs: {}",
+                        if user.is_empty() { "@me" } else { user }, e);
+                    let _ = tx.send(UpdateBatch {
+                        target_user: user.clone(),
+                        pr_updates: vec![],
+                        review_updates: vec![],
+                        hidden_count: 0,
+                        error: Some(e.to_string()),
+                    });
+                }
+            }
         }
-        tokio::select! {
-            _ = tokio::time::sleep(interval) => {}
-            _ = nudge.notified() => {
+
+        // If nudged during fetch, skip the sleep and loop immediately
+        if nudge.load(Ordering::Relaxed) {
+            eprintln!("Refresh requested during fetch, re-fetching immediately");
+            continue;
+        }
+
+        // Sleep with periodic nudge checks
+        let sleep_ms = interval.as_millis() as u64;
+        let check_interval = 200u64; // check every 200ms
+        let mut elapsed = 0u64;
+        while elapsed < sleep_ms {
+            tokio::time::sleep(std::time::Duration::from_millis(check_interval)).await;
+            elapsed += check_interval;
+            if nudge.load(Ordering::Relaxed) {
                 eprintln!("Manual refresh requested");
+                break;
             }
         }
     }
@@ -57,45 +99,46 @@ pub async fn fetch_prs_loop(
 async fn fetch_and_store(
     db: &Arc<Mutex<Connection>>,
     tx: &broadcast::Sender<UpdateBatch>,
+    user: &str,
 ) -> Result<(usize, usize), Box<dyn std::error::Error + Send + Sync>> {
     // Snapshot old state
     let old_prs: HashMap<(String, i64), db::PrRow> = {
         let conn = db.lock().unwrap();
-        db::list_prs(&conn, true)
+        db::list_prs(&conn, true, user)
             .into_iter()
             .map(|pr| ((pr.repo.clone(), pr.number), pr))
             .collect()
     };
     let old_reviews: HashMap<(String, i64), db::ReviewPrRow> = {
         let conn = db.lock().unwrap();
-        db::list_review_prs(&conn)
+        db::list_review_prs(&conn, user)
             .into_iter()
             .map(|pr| ((pr.repo.clone(), pr.number), pr))
             .collect()
     };
 
     // Single GraphQL call gets everything
-    let result = github::fetch_all_prs().await?;
+    let result = github::fetch_all_prs(user).await?;
     let my_count = result.my_prs.len();
     let review_count = result.review_prs.len();
 
     {
         let conn = db.lock().unwrap();
-        db::replace_prs(&conn, &result.my_prs)?;
-        db::replace_review_prs(&conn, &result.review_prs)?;
+        db::replace_prs(&conn, &result.my_prs, user)?;
+        db::replace_review_prs(&conn, &result.review_prs, user)?;
     }
 
     // Compute diffs
     let new_prs: HashMap<(String, i64), db::PrRow> = {
         let conn = db.lock().unwrap();
-        db::list_prs(&conn, true)
+        db::list_prs(&conn, true, user)
             .into_iter()
             .map(|pr| ((pr.repo.clone(), pr.number), pr))
             .collect()
     };
     let new_reviews: HashMap<(String, i64), db::ReviewPrRow> = {
         let conn = db.lock().unwrap();
-        db::list_review_prs(&conn)
+        db::list_review_prs(&conn, user)
             .into_iter()
             .map(|pr| ((pr.repo.clone(), pr.number), pr))
             .collect()
@@ -133,13 +176,17 @@ async fn fetch_and_store(
         }
     }
 
-    if !pr_updates.is_empty() || !review_updates.is_empty() {
-        let hidden_count = {
-            let conn = db.lock().unwrap();
-            db::hidden_count(&conn)
-        };
-        let _ = tx.send(UpdateBatch { pr_updates, review_updates, hidden_count });
-    }
+    let hidden_count = {
+        let conn = db.lock().unwrap();
+        db::hidden_count(&conn, user)
+    };
+    let _ = tx.send(UpdateBatch {
+        target_user: user.to_string(),
+        pr_updates,
+        review_updates,
+        hidden_count,
+        error: None,
+    });
 
     Ok((my_count, review_count))
 }

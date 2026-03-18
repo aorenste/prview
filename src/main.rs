@@ -3,9 +3,11 @@ mod github;
 mod web;
 mod worker;
 
+use std::collections::HashMap;
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use actix_web::{App, HttpServer};
@@ -49,16 +51,18 @@ async fn main() -> std::io::Result<()> {
     let build_hash = web::build_hash();
     eprintln!("Build hash: {}", build_hash);
 
-    let nudge = Arc::new(tokio::sync::Notify::new());
+    let nudge = Arc::new(AtomicBool::new(false));
+    let active_users = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
 
     // Spawn background PR fetcher
     let db_clone = db.clone();
     let tx_clone = tx.clone();
     let nudge_clone = nudge.clone();
+    let active_users_clone = active_users.clone();
     let interval = args.interval;
     eprintln!("Refresh interval: {}", humantime::format_duration(interval));
     tokio::spawn(async move {
-        worker::fetch_prs_loop(db_clone, interval, tx_clone, nudge_clone).await;
+        worker::fetch_prs_loop(db_clone, interval, tx_clone, nudge_clone, active_users_clone).await;
     });
 
     let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
@@ -82,17 +86,20 @@ async fn main() -> std::io::Result<()> {
     let tx_data = actix_web::web::Data::new(tx);
     let hash_data = actix_web::web::Data::new(build_hash);
     let nudge_data = actix_web::web::Data::new(nudge);
+    let active_users_data = actix_web::web::Data::new(active_users);
     HttpServer::new(move || {
         App::new()
             .app_data(db_data.clone())
             .app_data(tx_data.clone())
             .app_data(hash_data.clone())
             .app_data(nudge_data.clone())
+            .app_data(active_users_data.clone())
             .service(web::index)
             .service(web::events)
             .service(web::api_toggle_hidden)
             .service(web::api_toggle_review_read)
             .service(web::api_refresh)
+            .service(web::api_set_user)
     })
     .listen_openssl(reuseaddr_listener(args.port)?, builder)?
     .run()
