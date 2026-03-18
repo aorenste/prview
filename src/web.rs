@@ -1013,9 +1013,19 @@ function markRead(repo, number) {
 
 let currentUser = '';
 
+// Cookie helpers
+function setCookie(name, val) {
+  document.cookie = name + '=' + encodeURIComponent(val) + ';path=/;max-age=31536000;SameSite=Lax';
+}
+function getCookie(name) {
+  const m = document.cookie.match('(?:^|; )' + name + '=([^;]*)');
+  return m ? decodeURIComponent(m[1]) : '';
+}
+
 function setUser(user) {
   user = user.trim();
   currentUser = user;
+  setCookie('prview_user', user);
   const meBtn = document.getElementById('user-me-btn');
   const input = document.getElementById('user-input');
   if (user === '') {
@@ -1084,6 +1094,17 @@ function connectSSE() {
   evtSource.onerror = () => {
     document.getElementById('conn-error').style.display = 'block';
   };
+}
+
+// Restore user from cookie
+const savedUser = getCookie('prview_user');
+if (savedUser) {
+  currentUser = savedUser;
+  const meBtn = document.getElementById('user-me-btn');
+  const input = document.getElementById('user-input');
+  meBtn.classList.remove('active');
+  input.classList.add('active-user');
+  input.value = savedUser;
 }
 
 connectSSE();
