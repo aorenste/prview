@@ -1,0 +1,403 @@
+use std::path::Path;
+
+use rusqlite::Connection;
+use serde::Serialize;
+
+#[derive(Clone, Serialize, PartialEq)]
+pub struct PrRow {
+    pub repo: String,
+    pub number: i64,
+    pub title: String,
+    pub url: String,
+    pub updated_at: String,
+    pub hidden: bool,
+    pub review_status: String,
+    pub reviewers: String,
+    pub checks_success: i64,
+    pub checks_fail: i64,
+    pub checks_pending: i64,
+    pub drci_status: String,
+    pub drci_emoji: String,
+    pub comment_count: i64,
+}
+
+#[derive(Clone, Serialize, PartialEq)]
+pub struct ReviewPrRow {
+    pub repo: String,
+    pub number: i64,
+    pub title: String,
+    pub url: String,
+    pub author: String,
+    pub is_draft: bool,
+    pub is_read: bool,
+    pub review_status: String,
+    pub reviewers: String,
+    pub checks_overall: String,
+    pub checks_success: i64,
+    pub checks_fail: i64,
+    pub checks_pending: i64,
+    pub drci_status: String,
+    pub drci_emoji: String,
+    pub comment_count: i64,
+    pub head_sha: String,
+}
+
+pub struct PrInsert {
+    pub number: i64,
+    pub repo: String,
+    pub title: String,
+    pub url: String,
+    pub state: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub author: String,
+    pub is_draft: bool,
+    pub review_status: String,
+    pub reviewers: String,
+    pub checks_overall: String,
+    pub checks_success: i64,
+    pub checks_fail: i64,
+    pub checks_pending: i64,
+    pub drci_status: String,
+    pub drci_emoji: String,
+    pub comment_count: i64,
+    pub head_sha: String,
+}
+
+const CURRENT_VERSION: i64 = 4;
+
+/// Each entry migrates from version (index) to version (index + 1).
+const MIGRATIONS: &[&str] = &[
+    // 0 -> 1: initial prs table with all columns
+    "CREATE TABLE IF NOT EXISTS prs (
+        number INTEGER NOT NULL,
+        repo TEXT NOT NULL,
+        title TEXT NOT NULL,
+        url TEXT NOT NULL,
+        state TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        hidden INTEGER NOT NULL DEFAULT 0,
+        review_status TEXT NOT NULL DEFAULT '',
+        reviewers TEXT NOT NULL DEFAULT '',
+        checks_success INTEGER NOT NULL DEFAULT 0,
+        checks_fail INTEGER NOT NULL DEFAULT 0,
+        checks_pending INTEGER NOT NULL DEFAULT 0,
+        drci_status TEXT NOT NULL DEFAULT '',
+        drci_emoji TEXT NOT NULL DEFAULT '',
+        comment_count INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (repo, number)
+    )",
+    // 1 -> 2: review_prs table
+    "CREATE TABLE IF NOT EXISTS review_prs (
+        number INTEGER NOT NULL,
+        repo TEXT NOT NULL,
+        title TEXT NOT NULL,
+        url TEXT NOT NULL,
+        state TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        author TEXT NOT NULL DEFAULT '',
+        is_draft INTEGER NOT NULL DEFAULT 0,
+        review_status TEXT NOT NULL DEFAULT '',
+        reviewers TEXT NOT NULL DEFAULT '',
+        checks_success INTEGER NOT NULL DEFAULT 0,
+        checks_fail INTEGER NOT NULL DEFAULT 0,
+        checks_pending INTEGER NOT NULL DEFAULT 0,
+        drci_status TEXT NOT NULL DEFAULT '',
+        drci_emoji TEXT NOT NULL DEFAULT '',
+        comment_count INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (repo, number)
+    )",
+    // 2 -> 3: add checks_overall to review_prs
+    "ALTER TABLE review_prs ADD COLUMN checks_overall TEXT NOT NULL DEFAULT ''",
+    // 3 -> 4: read/unread state and head_sha for review_prs
+    "ALTER TABLE review_prs ADD COLUMN head_sha TEXT NOT NULL DEFAULT '';
+     ALTER TABLE review_prs ADD COLUMN is_read INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE review_prs ADD COLUMN read_comment_count INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE review_prs ADD COLUMN read_review_status TEXT NOT NULL DEFAULT '';
+     ALTER TABLE review_prs ADD COLUMN read_head_sha TEXT NOT NULL DEFAULT ''",
+];
+
+pub fn init_db(path: &Path) -> Connection {
+    let conn = Connection::open(path)
+        .unwrap_or_else(|e| panic!("Failed to open database {:?}: {}", path, e));
+
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap_or(0);
+
+    if version == 0 {
+        // Check if this is a pre-versioning DB (has prs table already)
+        let has_prs: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='prs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+
+        if has_prs {
+            // Legacy DB: prs table exists but no version. The table already has all
+            // columns (added via old ALTER TABLE migrations). Just stamp it at version 1
+            // and run remaining migrations.
+            eprintln!("Migrating legacy database to versioned schema");
+            conn.execute_batch("PRAGMA user_version = 1")
+                .expect("Failed to set user_version");
+            run_migrations(&conn, 1);
+            return conn;
+        }
+    }
+
+    run_migrations(&conn, version);
+    conn
+}
+
+fn run_migrations(conn: &Connection, from_version: i64) {
+    for v in from_version..CURRENT_VERSION {
+        let idx = v as usize;
+        eprintln!("Running migration {} -> {}", v, v + 1);
+        conn.execute_batch(MIGRATIONS[idx])
+            .unwrap_or_else(|e| panic!("Migration {} -> {} failed: {}", v, v + 1, e));
+        conn.execute_batch(&format!("PRAGMA user_version = {}", v + 1))
+            .expect("Failed to set user_version");
+    }
+}
+
+pub fn replace_prs(conn: &Connection, prs: &[PrInsert]) -> Result<(), rusqlite::Error> {
+    conn.execute_batch("CREATE TEMP TABLE IF NOT EXISTS hidden_state AS SELECT repo, number, hidden FROM prs WHERE hidden = 1")?;
+    conn.execute("DELETE FROM prs", [])?;
+    let mut stmt = conn.prepare(
+        "INSERT INTO prs (number, repo, title, url, state, created_at, updated_at, hidden,
+                          review_status, reviewers, checks_success, checks_fail, checks_pending,
+                          drci_status, drci_emoji, comment_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7,
+                 COALESCE((SELECT hidden FROM temp.hidden_state WHERE repo = ?2 AND number = ?1), 0),
+                 ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+    )?;
+    for pr in prs {
+        stmt.execute(rusqlite::params![
+            pr.number, pr.repo, pr.title, pr.url, pr.state, pr.created_at, pr.updated_at,
+            pr.review_status, pr.reviewers, pr.checks_success, pr.checks_fail, pr.checks_pending,
+            pr.drci_status, pr.drci_emoji, pr.comment_count,
+        ])?;
+    }
+    conn.execute_batch("DROP TABLE IF EXISTS temp.hidden_state")?;
+    Ok(())
+}
+
+pub fn list_prs(conn: &Connection, show_hidden: bool) -> Vec<PrRow> {
+    let sql = if show_hidden {
+        "SELECT repo, number, title, url, updated_at, hidden,
+                review_status, reviewers, checks_success, checks_fail, checks_pending,
+                drci_status, drci_emoji, comment_count
+         FROM prs ORDER BY updated_at DESC"
+    } else {
+        "SELECT repo, number, title, url, updated_at, hidden,
+                review_status, reviewers, checks_success, checks_fail, checks_pending,
+                drci_status, drci_emoji, comment_count
+         FROM prs WHERE hidden = 0 ORDER BY updated_at DESC"
+    };
+    let mut stmt = conn.prepare(sql).unwrap();
+    stmt.query_map([], |row| {
+        Ok(PrRow {
+            repo: row.get(0)?,
+            number: row.get(1)?,
+            title: row.get(2)?,
+            url: row.get(3)?,
+            updated_at: row.get(4)?,
+            hidden: row.get::<_, i64>(5)? != 0,
+            review_status: row.get(6)?,
+            reviewers: row.get(7)?,
+            checks_success: row.get(8)?,
+            checks_fail: row.get(9)?,
+            checks_pending: row.get(10)?,
+            drci_status: row.get(11)?,
+            drci_emoji: row.get(12)?,
+            comment_count: row.get(13)?,
+        })
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
+}
+
+pub fn get_pr(conn: &Connection, repo: &str, number: i64) -> Option<PrRow> {
+    conn.query_row(
+        "SELECT repo, number, title, url, updated_at, hidden,
+                review_status, reviewers, checks_success, checks_fail, checks_pending,
+                drci_status, drci_emoji, comment_count
+         FROM prs WHERE repo = ?1 AND number = ?2",
+        rusqlite::params![repo, number],
+        |row| {
+            Ok(PrRow {
+                repo: row.get(0)?,
+                number: row.get(1)?,
+                title: row.get(2)?,
+                url: row.get(3)?,
+                updated_at: row.get(4)?,
+                hidden: row.get::<_, i64>(5)? != 0,
+                review_status: row.get(6)?,
+                reviewers: row.get(7)?,
+                checks_success: row.get(8)?,
+                checks_fail: row.get(9)?,
+                checks_pending: row.get(10)?,
+                drci_status: row.get(11)?,
+                drci_emoji: row.get(12)?,
+                comment_count: row.get(13)?,
+            })
+        },
+    )
+    .ok()
+}
+
+pub fn hidden_count(conn: &Connection) -> i64 {
+    conn.query_row("SELECT COUNT(*) FROM prs WHERE hidden = 1", [], |row| row.get(0))
+        .unwrap_or(0)
+}
+
+pub fn set_hidden(conn: &Connection, repo: &str, number: i64, hidden: i64) {
+    conn.execute(
+        "UPDATE prs SET hidden = ?1 WHERE repo = ?2 AND number = ?3",
+        rusqlite::params![hidden, repo, number],
+    )
+    .ok();
+}
+
+pub fn replace_review_prs(conn: &Connection, prs: &[PrInsert]) -> Result<(), rusqlite::Error> {
+    // Preserve read state from old data
+    conn.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS read_state AS
+         SELECT repo, number, is_read, read_comment_count, read_review_status, read_head_sha
+         FROM review_prs WHERE is_read = 1"
+    )?;
+
+    conn.execute("DELETE FROM review_prs", [])?;
+    let mut stmt = conn.prepare(
+        "INSERT INTO review_prs (number, repo, title, url, state, created_at, updated_at,
+                                  author, is_draft,
+                                  review_status, reviewers, checks_overall,
+                                  checks_success, checks_fail, checks_pending,
+                                  drci_status, drci_emoji, comment_count, head_sha)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+    )?;
+    for pr in prs {
+        stmt.execute(rusqlite::params![
+            pr.number, pr.repo, pr.title, pr.url, pr.state, pr.created_at, pr.updated_at,
+            pr.author, pr.is_draft as i64,
+            pr.review_status, pr.reviewers, pr.checks_overall,
+            pr.checks_success, pr.checks_fail, pr.checks_pending,
+            pr.drci_status, pr.drci_emoji, pr.comment_count, pr.head_sha,
+        ])?;
+    }
+
+    // Restore read state for PRs that still exist
+    conn.execute_batch(
+        "UPDATE review_prs SET
+            is_read = 1,
+            read_comment_count = rs.read_comment_count,
+            read_review_status = rs.read_review_status,
+            read_head_sha = rs.read_head_sha
+         FROM temp.read_state rs
+         WHERE review_prs.repo = rs.repo AND review_prs.number = rs.number"
+    )?;
+
+    // Auto-unread: if tracked fields changed since last mark-read
+    conn.execute_batch(
+        "UPDATE review_prs SET is_read = 0
+         WHERE is_read = 1 AND (
+            comment_count != read_comment_count
+            OR review_status != read_review_status
+            OR head_sha != read_head_sha
+         )"
+    )?;
+
+    conn.execute_batch("DROP TABLE IF EXISTS temp.read_state")?;
+    Ok(())
+}
+
+pub fn list_review_prs(conn: &Connection) -> Vec<ReviewPrRow> {
+    let mut stmt = conn.prepare(
+        "SELECT repo, number, title, url, author, is_draft, is_read,
+                review_status, reviewers, checks_overall,
+                checks_success, checks_fail, checks_pending,
+                drci_status, drci_emoji, comment_count, head_sha
+         FROM review_prs ORDER BY updated_at DESC",
+    ).unwrap();
+    stmt.query_map([], |row| {
+        Ok(ReviewPrRow {
+            repo: row.get(0)?,
+            number: row.get(1)?,
+            title: row.get(2)?,
+            url: row.get(3)?,
+            author: row.get(4)?,
+            is_draft: row.get::<_, i64>(5)? != 0,
+            is_read: row.get::<_, i64>(6)? != 0,
+            review_status: row.get(7)?,
+            reviewers: row.get(8)?,
+            checks_overall: row.get(9)?,
+            checks_success: row.get(10)?,
+            checks_fail: row.get(11)?,
+            checks_pending: row.get(12)?,
+            drci_status: row.get(13)?,
+            drci_emoji: row.get(14)?,
+            comment_count: row.get(15)?,
+            head_sha: row.get(16)?,
+        })
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
+}
+
+pub fn set_review_read(conn: &Connection, repo: &str, number: i64, read: bool) {
+    if read {
+        // Mark read and snapshot current values
+        conn.execute(
+            "UPDATE review_prs SET is_read = 1,
+                read_comment_count = comment_count,
+                read_review_status = review_status,
+                read_head_sha = head_sha
+             WHERE repo = ?1 AND number = ?2",
+            rusqlite::params![repo, number],
+        ).ok();
+    } else {
+        conn.execute(
+            "UPDATE review_prs SET is_read = 0 WHERE repo = ?1 AND number = ?2",
+            rusqlite::params![repo, number],
+        ).ok();
+    }
+}
+
+pub fn get_review_pr(conn: &Connection, repo: &str, number: i64) -> Option<ReviewPrRow> {
+    conn.query_row(
+        "SELECT repo, number, title, url, author, is_draft, is_read,
+                review_status, reviewers, checks_overall,
+                checks_success, checks_fail, checks_pending,
+                drci_status, drci_emoji, comment_count, head_sha
+         FROM review_prs WHERE repo = ?1 AND number = ?2",
+        rusqlite::params![repo, number],
+        |row| {
+            Ok(ReviewPrRow {
+                repo: row.get(0)?,
+                number: row.get(1)?,
+                title: row.get(2)?,
+                url: row.get(3)?,
+                author: row.get(4)?,
+                is_draft: row.get::<_, i64>(5)? != 0,
+                is_read: row.get::<_, i64>(6)? != 0,
+                review_status: row.get(7)?,
+                reviewers: row.get(8)?,
+                checks_overall: row.get(9)?,
+                checks_success: row.get(10)?,
+                checks_fail: row.get(11)?,
+                checks_pending: row.get(12)?,
+                drci_status: row.get(13)?,
+                drci_emoji: row.get(14)?,
+                comment_count: row.get(15)?,
+                head_sha: row.get(16)?,
+            })
+        },
+    )
+    .ok()
+}

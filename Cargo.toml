@@ -1,0 +1,17 @@
+[package]
+name = "prview"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+actix-web = { version = "4", features = ["openssl"] }
+async-stream = "0.3"
+clap = { version = "4", features = ["derive"] }
+hostname = "0.4"
+humantime = "2"
+openssl = "0.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+socket2 = "0.5"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "time"] }
