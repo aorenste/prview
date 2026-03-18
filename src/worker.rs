@@ -46,24 +46,25 @@ pub async fn fetch_prs_loop(
     loop {
         nudge.store(false, Ordering::Relaxed);
 
-        let users: Vec<String> = {
+        let users: Vec<(String, usize)> = {
             let map = active_users.lock().unwrap();
             if map.is_empty() {
-                vec![String::new()] // default to @me
+                vec![(String::new(), 0)] // default to @me
             } else {
-                map.keys().cloned().collect()
+                map.iter().map(|(k, v)| (k.clone(), *v)).collect()
             }
         };
 
-        for user in &users {
+        for (user, conns) in &users {
+            let label = if user.is_empty() { "@me" } else { user.as_str() };
             match fetch_and_store(&db, &tx, user).await {
                 Ok((my_count, review_count)) => {
-                    eprintln!("[{}] Fetched {} open PRs, {} review-requested PRs",
-                        if user.is_empty() { "@me" } else { user }, my_count, review_count);
+                    eprintln!("[{}] Fetched {} open PRs, {} review-requested PRs ({} conn{})",
+                        label, my_count, review_count, conns, if *conns == 1 { "" } else { "s" });
                 }
                 Err(e) => {
                     eprintln!("[{}] Error fetching PRs: {}",
-                        if user.is_empty() { "@me" } else { user }, e);
+                        label, e);
                     let _ = tx.send(UpdateBatch {
                         target_user: user.clone(),
                         pr_updates: vec![],
