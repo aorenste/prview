@@ -41,6 +41,7 @@ pub struct ReviewPrRow {
     pub comment_count: i64,
     pub head_sha: String,
     pub updated_at: String,
+    pub ci_approval_needed: bool,
 }
 
 pub struct PrInsert {
@@ -63,9 +64,10 @@ pub struct PrInsert {
     pub drci_emoji: String,
     pub comment_count: i64,
     pub head_sha: String,
+    pub ci_approval_needed: bool,
 }
 
-const CURRENT_VERSION: i64 = 4;
+const CURRENT_VERSION: i64 = 5;
 
 /// Each entry migrates from version (index) to version (index + 1).
 const MIGRATIONS: &[&str] = &[
@@ -118,8 +120,9 @@ const MIGRATIONS: &[&str] = &[
      ALTER TABLE review_prs ADD COLUMN read_comment_count INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE review_prs ADD COLUMN read_review_status TEXT NOT NULL DEFAULT '';
      ALTER TABLE review_prs ADD COLUMN read_head_sha TEXT NOT NULL DEFAULT ''",
-    // 4 -> 5: track title changes for auto-unread
-    "ALTER TABLE review_prs ADD COLUMN read_title TEXT NOT NULL DEFAULT ''",
+    // 4 -> 5: track title changes for auto-unread, CI approval needed
+    "ALTER TABLE review_prs ADD COLUMN read_title TEXT NOT NULL DEFAULT '';
+     ALTER TABLE review_prs ADD COLUMN ci_approval_needed INTEGER NOT NULL DEFAULT 0",
 ];
 
 pub fn init_db(path: &Path) -> Connection {
@@ -281,8 +284,9 @@ pub fn replace_review_prs(conn: &Connection, prs: &[PrInsert]) -> Result<(), rus
                                   author, is_draft,
                                   review_status, reviewers, checks_overall,
                                   checks_success, checks_fail, checks_pending,
-                                  drci_status, drci_emoji, comment_count, head_sha)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                                  drci_status, drci_emoji, comment_count, head_sha,
+                                  ci_approval_needed)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
     )?;
     for pr in prs {
         stmt.execute(rusqlite::params![
@@ -291,6 +295,7 @@ pub fn replace_review_prs(conn: &Connection, prs: &[PrInsert]) -> Result<(), rus
             pr.review_status, pr.reviewers, pr.checks_overall,
             pr.checks_success, pr.checks_fail, pr.checks_pending,
             pr.drci_status, pr.drci_emoji, pr.comment_count, pr.head_sha,
+            pr.ci_approval_needed as i64,
         ])?;
     }
 
@@ -327,8 +332,8 @@ pub fn list_review_prs(conn: &Connection) -> Vec<ReviewPrRow> {
                 review_status, reviewers, checks_overall,
                 checks_success, checks_fail, checks_pending,
                 drci_status, drci_emoji, comment_count, head_sha,
-                updated_at
-         FROM review_prs ORDER BY updated_at DESC",
+                updated_at, ci_approval_needed
+         FROM review_prs ORDER BY ci_approval_needed DESC, updated_at DESC",
     ).unwrap();
     stmt.query_map([], |row| {
         Ok(ReviewPrRow {
@@ -350,6 +355,7 @@ pub fn list_review_prs(conn: &Connection) -> Vec<ReviewPrRow> {
             comment_count: row.get(15)?,
             head_sha: row.get(16)?,
             updated_at: row.get(17)?,
+            ci_approval_needed: row.get::<_, i64>(18)? != 0,
         })
     })
     .unwrap()
@@ -383,7 +389,7 @@ pub fn get_review_pr(conn: &Connection, repo: &str, number: i64) -> Option<Revie
                 review_status, reviewers, checks_overall,
                 checks_success, checks_fail, checks_pending,
                 drci_status, drci_emoji, comment_count, head_sha,
-                updated_at
+                updated_at, ci_approval_needed
          FROM review_prs WHERE repo = ?1 AND number = ?2",
         rusqlite::params![repo, number],
         |row| {
@@ -406,6 +412,7 @@ pub fn get_review_pr(conn: &Connection, repo: &str, number: i64) -> Option<Revie
                 comment_count: row.get(15)?,
                 head_sha: row.get(16)?,
                 updated_at: row.get(17)?,
+                ci_approval_needed: row.get::<_, i64>(18)? != 0,
             })
         },
     )

@@ -623,6 +623,11 @@ function drciPill(pr) {
   return `<span class="pill ${cls}" title="${tip}">${dot}${label}</span>`;
 }
 
+function ciApprovalPill(pr) {
+  if (!pr.ci_approval_needed) return '';
+  return '<span class="pill pill-red"><span class="spinner" style="border-color: var(--red); border-top-color: transparent;"></span>CI Approval</span>';
+}
+
 function checksOverallPill(pr) {
   if (!pr.checks_overall) return '<span class="pill pill-muted"><span class="pill-dot"></span>None</span>';
   if (pr.checks_overall === 'SUCCESS')
@@ -768,7 +773,7 @@ function renderReviews() {
       <td class="title-cell"><a href="${escapeHtml(pr.url)}" target="_blank" onclick="markRead('${escapeHtml(pr.repo)}', ${pr.number})">${escapeHtml(pr.title)}</a></td>
       <td><span class="author-text">${escapeHtml(pr.author)}</span></td>
       <td>${reviewPill(pr)}</td>
-      <td>${checksOverallPill(pr)}</td>
+      <td>${checksOverallPill(pr)} ${ciApprovalPill(pr)}</td>
       <td>${commentCell(pr)}</td>
       <td><span class="time-text" title="${escapeHtml(pr.updated_at || '')}">${relativeTime(pr.updated_at)}</span></td>
       <td class="menu-cell">
@@ -814,7 +819,8 @@ function applyUpdate(batch) {
       allReviewPrs = allReviewPrs.filter(p => prKey(p) !== key);
     }
   }
-  allReviewPrs.sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+  allReviewPrs.sort((a, b) => (b.ci_approval_needed ? 1 : 0) - (a.ci_approval_needed ? 1 : 0)
+    || (b.updated_at || '').localeCompare(a.updated_at || ''));
 
   renderAll();
 }

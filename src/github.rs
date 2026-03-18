@@ -229,8 +229,27 @@ fn convert_prs(nodes: &[GqlPr]) -> Vec<PrInsert> {
             drci_emoji,
             comment_count,
             head_sha: extract_head_sha(pr),
+            ci_approval_needed: false,
         }
     }).collect()
+}
+
+async fn check_ci_approval_needed(repo: &str, head_sha: &str) -> bool {
+    if head_sha.is_empty() {
+        return false;
+    }
+    let endpoint = format!("repos/{}/actions/runs?head_sha={}&status=action_required&per_page=1", repo, head_sha);
+    let output = tokio::process::Command::new("gh")
+        .args(["api", &endpoint, "--jq", ".total_count"])
+        .output()
+        .await;
+    match output {
+        Ok(o) if o.status.success() => {
+            let s = String::from_utf8_lossy(&o.stdout);
+            s.trim().parse::<i64>().unwrap_or(0) > 0
+        }
+        _ => false,
+    }
 }
 
 pub async fn fetch_all_prs() -> Result<FetchResult, Box<dyn std::error::Error + Send + Sync>> {
@@ -239,9 +258,20 @@ pub async fn fetch_all_prs() -> Result<FetchResult, Box<dyn std::error::Error + 
         run_query("is:pr is:open review-requested:@me", REVIEW_PR_FIELDS),
     )?;
 
+    let mut review_prs = convert_prs(&review_nodes);
+
+    // Check CI approval status for review PRs in parallel
+    let futures: Vec<_> = review_prs.iter()
+        .map(|pr| check_ci_approval_needed(&pr.repo, &pr.head_sha))
+        .collect();
+    let results = futures::future::join_all(futures).await;
+    for (pr, needed) in review_prs.iter_mut().zip(results) {
+        pr.ci_approval_needed = needed;
+    }
+
     Ok(FetchResult {
         my_prs: convert_prs(&my_nodes),
-        review_prs: convert_prs(&review_nodes),
+        review_prs,
     })
 }
 

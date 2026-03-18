@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 actix-web = { version = "4", features = ["openssl"] }
 async-stream = "0.3"
+futures = "0.3"
 clap = { version = "4", features = ["derive"] }
 hostname = "0.4"
 humantime = "2"
