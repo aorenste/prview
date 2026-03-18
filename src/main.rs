@@ -49,13 +49,16 @@ async fn main() -> std::io::Result<()> {
     let build_hash = web::build_hash();
     eprintln!("Build hash: {}", build_hash);
 
+    let nudge = Arc::new(tokio::sync::Notify::new());
+
     // Spawn background PR fetcher
     let db_clone = db.clone();
     let tx_clone = tx.clone();
+    let nudge_clone = nudge.clone();
     let interval = args.interval;
     eprintln!("Refresh interval: {}", humantime::format_duration(interval));
     tokio::spawn(async move {
-        worker::fetch_prs_loop(db_clone, interval, tx_clone).await;
+        worker::fetch_prs_loop(db_clone, interval, tx_clone, nudge_clone).await;
     });
 
     let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
@@ -78,15 +81,18 @@ async fn main() -> std::io::Result<()> {
     let db_data = actix_web::web::Data::new(db);
     let tx_data = actix_web::web::Data::new(tx);
     let hash_data = actix_web::web::Data::new(build_hash);
+    let nudge_data = actix_web::web::Data::new(nudge);
     HttpServer::new(move || {
         App::new()
             .app_data(db_data.clone())
             .app_data(tx_data.clone())
             .app_data(hash_data.clone())
+            .app_data(nudge_data.clone())
             .service(web::index)
             .service(web::events)
             .service(web::api_toggle_hidden)
             .service(web::api_toggle_review_read)
+            .service(web::api_refresh)
     })
     .listen_openssl(reuseaddr_listener(args.port)?, builder)?
     .run()

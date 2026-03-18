@@ -10,6 +10,7 @@ use crate::worker::UpdateBatch;
 
 pub type Db = web::Data<Arc<Mutex<Connection>>>;
 pub type Tx = web::Data<broadcast::Sender<UpdateBatch>>;
+pub type Nudge = web::Data<Arc<tokio::sync::Notify>>;
 
 pub fn build_hash() -> String {
     use std::hash::{Hash, Hasher};
@@ -143,6 +144,12 @@ pub async fn api_toggle_review_read(db: Db, tx: Tx, body: web::Json<ToggleReadRe
         let _ = tx.send(batch);
     }
 
+    HttpResponse::Ok().json(serde_json::json!({"ok": true}))
+}
+
+#[post("/api/refresh")]
+pub async fn api_refresh(nudge: Nudge) -> HttpResponse {
+    nudge.notify_one();
     HttpResponse::Ok().json(serde_json::json!({"ok": true}))
 }
 
@@ -470,6 +477,27 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
     color: var(--red);
     animation: pulse-glow 2s ease-in-out infinite;
   }
+
+  /* Refresh button */
+  .refresh-btn {
+    border: 1px solid var(--border);
+    background: none;
+    color: var(--text-muted);
+    font-size: 1.2em;
+    cursor: pointer;
+    padding: 4px 10px;
+    border-radius: 8px;
+    transition: all 0.15s ease;
+    font-family: inherit;
+    line-height: 1;
+  }
+  .refresh-btn:hover { color: var(--text); border-color: var(--text-dim); }
+  .refresh-btn.spinning {
+    animation: spin 0.8s linear infinite;
+    pointer-events: none;
+    color: var(--accent);
+    border-color: var(--accent);
+  }
 </style>
 </head>
 <body>
@@ -477,6 +505,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
 <div class="header">
   <h1>PRView</h1>
   <span class="badge">Live</span>
+  <button id="refresh-btn" class="refresh-btn" onclick="refreshNow()" title="Refresh now">&#x21bb;</button>
 </div>
 <div class="tabs">
   <button class="tab active" data-tab="my-prs">My Open PRs <span class="tab-count" id="my-prs-count">0</span></button>
@@ -880,6 +909,13 @@ function markRead(repo, number) {
     pr.is_read = true;
     renderReviews();
   }
+}
+
+function refreshNow() {
+  const btn = document.getElementById('refresh-btn');
+  btn.classList.add('spinning');
+  fetch('/api/refresh', { method: 'POST' })
+    .finally(() => setTimeout(() => btn.classList.remove('spinning'), 1000));
 }
 
 // --- SSE ---

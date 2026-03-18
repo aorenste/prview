@@ -36,6 +36,7 @@ pub async fn fetch_prs_loop(
     db: Arc<Mutex<Connection>>,
     interval: std::time::Duration,
     tx: broadcast::Sender<UpdateBatch>,
+    nudge: Arc<tokio::sync::Notify>,
 ) {
     loop {
         match fetch_and_store(&db, &tx).await {
@@ -44,7 +45,12 @@ pub async fn fetch_prs_loop(
             }
             Err(e) => eprintln!("Error fetching PRs: {}", e),
         }
-        tokio::time::sleep(interval).await;
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => {}
+            _ = nudge.notified() => {
+                eprintln!("Manual refresh requested");
+            }
+        }
     }
 }
 
