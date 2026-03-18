@@ -796,14 +796,17 @@ function renderMyPrs() {
   }
 
   tbody.innerHTML = visible.map(pr => {
-    const rowClass = pr.hidden ? ' class="hidden-row"' : '';
+    let cls = [];
+    if (pr.hidden) cls.push('hidden-row');
+    if (pr.is_draft) cls.push('draft-row');
+    const rowClass = cls.length ? ` class="${cls.join(' ')}"` : '';
     const checked = pr.hidden ? ' checked' : '';
     return `<tr${rowClass} data-key="${escapeHtml(prKey(pr))}">
       <td><input type="checkbox"${checked} onchange="toggleHidden('${escapeHtml(pr.repo)}', ${pr.number}, this.checked)" title="Hide this PR"></td>
       <td><span class="repo-text">${escapeHtml(pr.repo)}</span></td>
       <td class="mono"><a href="${escapeHtml(pr.url)}" target="_blank">#${pr.number}</a></td>
       <td class="title-cell"><a href="${escapeHtml(pr.url)}" target="_blank">${escapeHtml(pr.title)}</a></td>
-      <td>${reviewPill(pr)}</td>
+      <td>${pr.is_draft ? '<span class="pill pill-muted">Draft</span>' : reviewPill(pr)}</td>
       <td>${testsPill(pr)}</td>
       <td>${drciPill(pr)}</td>
       <td>${commentCell(pr)}</td>
@@ -931,7 +934,8 @@ function applyUpdate(batch) {
       allPrs = allPrs.filter(p => prKey(p) !== key);
     }
   }
-  allPrs.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  allPrs.sort((a, b) => (a.is_draft ? 1 : 0) - (b.is_draft ? 1 : 0)
+    || b.updated_at.localeCompare(a.updated_at));
 
   for (const u of batch.review_updates) {
     if (u.type === 'changed') {
@@ -1060,7 +1064,11 @@ function connectSSE() {
     const data = JSON.parse(e.data);
     checkBuildHash(data.build_hash);
     allPrs = data.prs;
+    allPrs.sort((a, b) => (a.is_draft ? 1 : 0) - (b.is_draft ? 1 : 0)
+      || b.updated_at.localeCompare(a.updated_at));
     allReviewPrs = data.review_prs;
+    allReviewPrs.sort((a, b) => (b.ci_approval_needed ? 1 : 0) - (a.ci_approval_needed ? 1 : 0)
+      || (b.updated_at || '').localeCompare(a.updated_at || ''));
     hiddenCount = data.hidden_count;
     hasFetched = (allPrs.length > 0 || allReviewPrs.length > 0);
     renderAll();

@@ -11,6 +11,7 @@ pub struct PrRow {
     pub url: String,
     pub updated_at: String,
     pub hidden: bool,
+    pub is_draft: bool,
     pub review_status: String,
     pub reviewers: String,
     pub checks_success: i64,
@@ -67,7 +68,7 @@ pub struct PrInsert {
     pub ci_approval_needed: bool,
 }
 
-const CURRENT_VERSION: i64 = 6;
+const CURRENT_VERSION: i64 = 7;
 
 /// Each entry migrates from version (index) to version (index + 1).
 const MIGRATIONS: &[&str] = &[
@@ -81,6 +82,7 @@ const MIGRATIONS: &[&str] = &[
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         hidden INTEGER NOT NULL DEFAULT 0,
+        is_draft INTEGER NOT NULL DEFAULT 0,
         review_status TEXT NOT NULL DEFAULT '',
         reviewers TEXT NOT NULL DEFAULT '',
         checks_success INTEGER NOT NULL DEFAULT 0,
@@ -136,6 +138,7 @@ const MIGRATIONS: &[&str] = &[
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         hidden INTEGER NOT NULL DEFAULT 0,
+        is_draft INTEGER NOT NULL DEFAULT 0,
         review_status TEXT NOT NULL DEFAULT '',
         reviewers TEXT NOT NULL DEFAULT '',
         checks_success INTEGER NOT NULL DEFAULT 0,
@@ -175,6 +178,8 @@ const MIGRATIONS: &[&str] = &[
         ci_approval_needed INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (target_user, repo, number)
      )",
+    // 6 -> 7: add is_draft to prs table
+    "ALTER TABLE prs ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0",
 ];
 
 pub fn init_db(path: &Path) -> Connection {
@@ -211,12 +216,30 @@ pub fn init_db(path: &Path) -> Connection {
     conn
 }
 
+fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
+    let sql = format!("PRAGMA table_info({})", table);
+    let mut stmt = conn.prepare(&sql).unwrap();
+    let names: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    names.iter().any(|n| n == column)
+}
+
 fn run_migrations(conn: &Connection, from_version: i64) {
     for v in from_version..CURRENT_VERSION {
         let idx = v as usize;
         eprintln!("Running migration {} -> {}", v, v + 1);
-        conn.execute_batch(MIGRATIONS[idx])
-            .unwrap_or_else(|e| panic!("Migration {} -> {} failed: {}", v, v + 1, e));
+
+        // Migration 6->7 adds is_draft, but some v6 DBs already have it
+        if v == 6 && has_column(conn, "prs", "is_draft") {
+            eprintln!("  is_draft column already exists, skipping ALTER");
+        } else {
+            conn.execute_batch(MIGRATIONS[idx])
+                .unwrap_or_else(|e| panic!("Migration {} -> {} failed: {}", v, v + 1, e));
+        }
+
         conn.execute_batch(&format!("PRAGMA user_version = {}", v + 1))
             .expect("Failed to set user_version");
     }
@@ -230,16 +253,17 @@ pub fn replace_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Result<()
     conn.execute("DELETE FROM prs WHERE target_user = ?1", rusqlite::params![user])?;
     let mut stmt = conn.prepare(
         "INSERT INTO prs (target_user, number, repo, title, url, state, created_at, updated_at, hidden,
-                          review_status, reviewers, checks_success, checks_fail, checks_pending,
+                          is_draft, review_status, reviewers, checks_success, checks_fail, checks_pending,
                           drci_status, drci_emoji, comment_count)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
                  COALESCE((SELECT hidden FROM temp.hidden_state WHERE target_user = ?1 AND repo = ?3 AND number = ?2), 0),
-                 ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                 ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
     )?;
     for pr in prs {
         stmt.execute(rusqlite::params![
             user,
             pr.number, pr.repo, pr.title, pr.url, pr.state, pr.created_at, pr.updated_at,
+            pr.is_draft as i64,
             pr.review_status, pr.reviewers, pr.checks_success, pr.checks_fail, pr.checks_pending,
             pr.drci_status, pr.drci_emoji, pr.comment_count,
         ])?;
@@ -250,12 +274,12 @@ pub fn replace_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Result<()
 
 pub fn list_prs(conn: &Connection, show_hidden: bool, user: &str) -> Vec<PrRow> {
     let sql = if show_hidden {
-        "SELECT repo, number, title, url, updated_at, hidden,
+        "SELECT repo, number, title, url, updated_at, hidden, is_draft,
                 review_status, reviewers, checks_success, checks_fail, checks_pending,
                 drci_status, drci_emoji, comment_count
          FROM prs WHERE target_user = ?1 ORDER BY updated_at DESC"
     } else {
-        "SELECT repo, number, title, url, updated_at, hidden,
+        "SELECT repo, number, title, url, updated_at, hidden, is_draft,
                 review_status, reviewers, checks_success, checks_fail, checks_pending,
                 drci_status, drci_emoji, comment_count
          FROM prs WHERE target_user = ?1 AND hidden = 0 ORDER BY updated_at DESC"
@@ -269,14 +293,15 @@ pub fn list_prs(conn: &Connection, show_hidden: bool, user: &str) -> Vec<PrRow> 
             url: row.get(3)?,
             updated_at: row.get(4)?,
             hidden: row.get::<_, i64>(5)? != 0,
-            review_status: row.get(6)?,
-            reviewers: row.get(7)?,
-            checks_success: row.get(8)?,
-            checks_fail: row.get(9)?,
-            checks_pending: row.get(10)?,
-            drci_status: row.get(11)?,
-            drci_emoji: row.get(12)?,
-            comment_count: row.get(13)?,
+            is_draft: row.get::<_, i64>(6)? != 0,
+            review_status: row.get(7)?,
+            reviewers: row.get(8)?,
+            checks_success: row.get(9)?,
+            checks_fail: row.get(10)?,
+            checks_pending: row.get(11)?,
+            drci_status: row.get(12)?,
+            drci_emoji: row.get(13)?,
+            comment_count: row.get(14)?,
         })
     })
     .unwrap()
@@ -286,7 +311,7 @@ pub fn list_prs(conn: &Connection, show_hidden: bool, user: &str) -> Vec<PrRow> 
 
 pub fn get_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> Option<PrRow> {
     conn.query_row(
-        "SELECT repo, number, title, url, updated_at, hidden,
+        "SELECT repo, number, title, url, updated_at, hidden, is_draft,
                 review_status, reviewers, checks_success, checks_fail, checks_pending,
                 drci_status, drci_emoji, comment_count
          FROM prs WHERE target_user = ?1 AND repo = ?2 AND number = ?3",
@@ -299,14 +324,15 @@ pub fn get_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> Option<
                 url: row.get(3)?,
                 updated_at: row.get(4)?,
                 hidden: row.get::<_, i64>(5)? != 0,
-                review_status: row.get(6)?,
-                reviewers: row.get(7)?,
-                checks_success: row.get(8)?,
-                checks_fail: row.get(9)?,
-                checks_pending: row.get(10)?,
-                drci_status: row.get(11)?,
-                drci_emoji: row.get(12)?,
-                comment_count: row.get(13)?,
+                is_draft: row.get::<_, i64>(6)? != 0,
+                review_status: row.get(7)?,
+                reviewers: row.get(8)?,
+                checks_success: row.get(9)?,
+                checks_fail: row.get(10)?,
+                checks_pending: row.get(11)?,
+                drci_status: row.get(12)?,
+                drci_emoji: row.get(13)?,
+                comment_count: row.get(14)?,
             })
         },
     )
