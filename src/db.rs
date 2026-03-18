@@ -40,6 +40,7 @@ pub struct ReviewPrRow {
     pub drci_emoji: String,
     pub comment_count: i64,
     pub head_sha: String,
+    pub updated_at: String,
 }
 
 pub struct PrInsert {
@@ -321,7 +322,8 @@ pub fn list_review_prs(conn: &Connection) -> Vec<ReviewPrRow> {
         "SELECT repo, number, title, url, author, is_draft, is_read,
                 review_status, reviewers, checks_overall,
                 checks_success, checks_fail, checks_pending,
-                drci_status, drci_emoji, comment_count, head_sha
+                drci_status, drci_emoji, comment_count, head_sha,
+                updated_at
          FROM review_prs ORDER BY updated_at DESC",
     ).unwrap();
     stmt.query_map([], |row| {
@@ -343,6 +345,7 @@ pub fn list_review_prs(conn: &Connection) -> Vec<ReviewPrRow> {
             drci_emoji: row.get(14)?,
             comment_count: row.get(15)?,
             head_sha: row.get(16)?,
+            updated_at: row.get(17)?,
         })
     })
     .unwrap()
@@ -374,7 +377,8 @@ pub fn get_review_pr(conn: &Connection, repo: &str, number: i64) -> Option<Revie
         "SELECT repo, number, title, url, author, is_draft, is_read,
                 review_status, reviewers, checks_overall,
                 checks_success, checks_fail, checks_pending,
-                drci_status, drci_emoji, comment_count, head_sha
+                drci_status, drci_emoji, comment_count, head_sha,
+                updated_at
          FROM review_prs WHERE repo = ?1 AND number = ?2",
         rusqlite::params![repo, number],
         |row| {
@@ -396,6 +400,7 @@ pub fn get_review_pr(conn: &Connection, repo: &str, number: i64) -> Option<Revie
                 drci_emoji: row.get(14)?,
                 comment_count: row.get(15)?,
                 head_sha: row.get(16)?,
+                updated_at: row.get(17)?,
             })
         },
     )

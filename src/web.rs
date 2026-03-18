@@ -514,11 +514,12 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
           <th>Review</th>
           <th>CI</th>
           <th>Comments</th>
+          <th>Updated</th>
           <th style="width:40px"></th>
         </tr>
       </thead>
       <tbody id="reviews-body">
-        <tr><td colspan="9" class="empty-state">Connecting...</td></tr>
+        <tr><td colspan="10" class="empty-state">Connecting...</td></tr>
       </tbody>
     </table>
   </div>
@@ -749,7 +750,7 @@ function renderReviews() {
   countEl.classList.toggle('attention', unreadCount > 5);
 
   if (visible.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No review requests found</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No review requests found</td></tr>';
     return;
   }
 
@@ -769,6 +770,7 @@ function renderReviews() {
       <td>${reviewPill(pr)}</td>
       <td>${checksOverallPill(pr)}</td>
       <td>${commentCell(pr)}</td>
+      <td><span class="time-text" title="${escapeHtml(pr.updated_at || '')}">${relativeTime(pr.updated_at)}</span></td>
       <td class="menu-cell">
         <button class="menu-btn" onclick="toggleMenu(event)">&#x22ef;</button>
         <div class="dropdown">
