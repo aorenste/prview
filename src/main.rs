@@ -33,7 +33,7 @@ struct Args {
     db: PathBuf,
 
     /// How often to fetch PRs from GitHub (e.g. "5m", "30s", "1h")
-    #[arg(long, default_value = "5m", value_parser = humantime::parse_duration)]
+    #[arg(long, default_value = "1m", value_parser = humantime::parse_duration)]
     interval: Duration,
 }
 
