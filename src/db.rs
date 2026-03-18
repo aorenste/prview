@@ -118,6 +118,8 @@ const MIGRATIONS: &[&str] = &[
      ALTER TABLE review_prs ADD COLUMN read_comment_count INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE review_prs ADD COLUMN read_review_status TEXT NOT NULL DEFAULT '';
      ALTER TABLE review_prs ADD COLUMN read_head_sha TEXT NOT NULL DEFAULT ''",
+    // 4 -> 5: track title changes for auto-unread
+    "ALTER TABLE review_prs ADD COLUMN read_title TEXT NOT NULL DEFAULT ''",
 ];
 
 pub fn init_db(path: &Path) -> Connection {
@@ -269,7 +271,7 @@ pub fn replace_review_prs(conn: &Connection, prs: &[PrInsert]) -> Result<(), rus
     // Preserve read state from old data
     conn.execute_batch(
         "CREATE TEMP TABLE IF NOT EXISTS read_state AS
-         SELECT repo, number, is_read, read_comment_count, read_review_status, read_head_sha
+         SELECT repo, number, is_read, read_comment_count, read_review_status, read_head_sha, read_title
          FROM review_prs WHERE is_read = 1"
     )?;
 
@@ -298,7 +300,8 @@ pub fn replace_review_prs(conn: &Connection, prs: &[PrInsert]) -> Result<(), rus
             is_read = 1,
             read_comment_count = rs.read_comment_count,
             read_review_status = rs.read_review_status,
-            read_head_sha = rs.read_head_sha
+            read_head_sha = rs.read_head_sha,
+            read_title = rs.read_title
          FROM temp.read_state rs
          WHERE review_prs.repo = rs.repo AND review_prs.number = rs.number"
     )?;
@@ -310,6 +313,7 @@ pub fn replace_review_prs(conn: &Connection, prs: &[PrInsert]) -> Result<(), rus
             comment_count != read_comment_count
             OR review_status != read_review_status
             OR head_sha != read_head_sha
+            OR title != read_title
          )"
     )?;
 
@@ -360,7 +364,8 @@ pub fn set_review_read(conn: &Connection, repo: &str, number: i64, read: bool) {
             "UPDATE review_prs SET is_read = 1,
                 read_comment_count = comment_count,
                 read_review_status = review_status,
-                read_head_sha = head_sha
+                read_head_sha = head_sha,
+                read_title = title
              WHERE repo = ?1 AND number = ?2",
             rusqlite::params![repo, number],
         ).ok();
