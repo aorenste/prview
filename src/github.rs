@@ -48,7 +48,17 @@ struct GqlData {
 
 #[derive(Deserialize)]
 struct GqlSearch {
+    #[serde(rename = "pageInfo")]
+    page_info: GqlPageInfo,
     nodes: Vec<GqlPr>,
+}
+
+#[derive(Deserialize)]
+struct GqlPageInfo {
+    #[serde(rename = "hasNextPage")]
+    has_next_page: bool,
+    #[serde(rename = "endCursor")]
+    end_cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -143,10 +153,15 @@ pub struct FetchResult {
     pub review_prs: Vec<PrInsert>,
 }
 
-fn make_query(search_filter: &str, fields: &str) -> String {
+fn make_query(search_filter: &str, fields: &str, cursor: Option<&str>) -> String {
+    let after = match cursor {
+        Some(c) => format!(r#", after: "{}""#, c),
+        None => String::new(),
+    };
     format!(
         r#"query {{
-  search(query: "{}", type: ISSUE, first: 50) {{
+  search(query: "{}", type: ISSUE, first: 50{}) {{
+    pageInfo {{ hasNextPage endCursor }}
     nodes {{
       ... on PullRequest {{
         {}
@@ -154,24 +169,37 @@ fn make_query(search_filter: &str, fields: &str) -> String {
     }}
   }}
 }}"#,
-        search_filter, fields
+        search_filter, after, fields
     )
 }
 
 async fn run_query(search_filter: &str, fields: &str) -> Result<Vec<GqlPr>, Box<dyn std::error::Error + Send + Sync>> {
-    let query = make_query(search_filter, fields);
-    let output = tokio::process::Command::new("gh")
-        .args(["api", "graphql", "-f", &format!("query={}", query)])
-        .output()
-        .await?;
+    let mut all_nodes = Vec::new();
+    let mut cursor: Option<String> = None;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("GraphQL query failed: {}", stderr).into());
+    loop {
+        let query = make_query(search_filter, fields, cursor.as_deref());
+        let output = tokio::process::Command::new("gh")
+            .args(["api", "graphql", "-f", &format!("query={}", query)])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("GraphQL query failed: {}", stderr).into());
+        }
+
+        let resp: GqlResponse = serde_json::from_slice(&output.stdout)?;
+        all_nodes.extend(resp.data.search.nodes);
+
+        if resp.data.search.page_info.has_next_page {
+            cursor = resp.data.search.page_info.end_cursor;
+        } else {
+            break;
+        }
     }
 
-    let resp: GqlResponse = serde_json::from_slice(&output.stdout)?;
-    Ok(resp.data.search.nodes)
+    Ok(all_nodes)
 }
 
 fn convert_prs(nodes: &[GqlPr]) -> Vec<PrInsert> {

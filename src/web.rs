@@ -639,7 +639,7 @@ function reviewStatusPill(pr) {
     return '<span class="pill pill-green"><span class="pill-dot"></span>Approved</span>';
   if (pr.review_status === 'CHANGES_REQUESTED')
     return '<span class="pill pill-red"><span class="pill-dot"></span>Changes</span>';
-  return '<span class="pill pill-yellow"><span class="spinner"></span>Awaiting</span>';
+  return '<span class="pill pill-yellow"><span class="pill-dot"></span>Awaiting</span>';
 }
 
 function commentCell(pr) {
@@ -814,6 +814,7 @@ function applyUpdate(batch) {
       allReviewPrs = allReviewPrs.filter(p => prKey(p) !== key);
     }
   }
+  allReviewPrs.sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
 
   renderAll();
 }
