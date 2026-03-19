@@ -329,6 +329,9 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
   .tab.active .tab-count {
     background: rgba(255,255,255,0.15);
   }
+  .tab-count-dim {
+    opacity: 0.5;
+  }
 
   /* Card container */
   .card {
@@ -592,8 +595,8 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
   </div>
 </div>
 <div class="tabs">
-  <button class="tab active" data-tab="my-prs">My Open PRs <span class="tab-count" id="my-prs-count">0</span></button>
-  <button class="tab" data-tab="reviews">Needs Attention <span class="tab-count" id="reviews-count">0</span></button>
+  <button class="tab active" data-tab="my-prs">My Open PRs <span class="tab-count" id="my-prs-count">0</span><span class="tab-count tab-count-dim" id="my-prs-draft-count" style="display:none"></span></button>
+  <button class="tab" data-tab="reviews">Needs Attention <span class="tab-count" id="reviews-count">0</span><span class="tab-count tab-count-dim" id="reviews-read-count" style="display:none"></span></button>
 </div>
 
 <div id="my-prs-panel" class="tab-panel active">
@@ -776,7 +779,17 @@ function renderMyPrs() {
     bar.innerHTML = '';
   }
 
-  document.getElementById('my-prs-count').textContent = allPrs.filter(p => !p.hidden).length;
+  const nonHidden = allPrs.filter(p => !p.hidden);
+  const nonDraftCount = nonHidden.filter(p => !p.is_draft).length;
+  const draftCount2 = nonHidden.filter(p => p.is_draft).length;
+  document.getElementById('my-prs-count').textContent = nonDraftCount;
+  const draftCountEl = document.getElementById('my-prs-draft-count');
+  if (draftCount2 > 0) {
+    draftCountEl.textContent = '+' + draftCount2;
+    draftCountEl.style.display = '';
+  } else {
+    draftCountEl.style.display = 'none';
+  }
 
   if (visible.length === 0) {
     tbody.innerHTML = '<tr><td colspan="9" class="empty-state">' +
@@ -857,9 +870,17 @@ function renderReviews() {
 
   // Update count + attention pulse
   const countEl = document.getElementById('reviews-count');
-  countEl.textContent = visible.length;
+  const readCountEl = document.getElementById('reviews-read-count');
   const unreadCount = visible.filter(p => !p.is_read).length;
+  const readCount = visible.length - unreadCount;
+  countEl.textContent = unreadCount;
   countEl.classList.toggle('attention', unreadCount > 5);
+  if (readCount > 0) {
+    readCountEl.textContent = '+' + readCount;
+    readCountEl.style.display = '';
+  } else {
+    readCountEl.style.display = 'none';
+  }
 
   if (visible.length === 0) {
     tbody.innerHTML = '<tr><td colspan="10" class="empty-state">' +
