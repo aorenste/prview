@@ -713,17 +713,6 @@ function reviewPill(pr) {
   return `<span class="pill pill-muted" title="${escapeHtml(tip)}"><span class="pill-dot"></span>None</span>`;
 }
 
-function testsPill(pr) {
-  const total = pr.checks_success + pr.checks_fail + pr.checks_pending;
-  if (total === 0) return '<span class="pill pill-muted"><span class="pill-dot"></span>None</span>';
-  const tip = `${pr.checks_success} passed, ${pr.checks_fail} failed, ${pr.checks_pending} pending`;
-  if (pr.checks_fail > 0)
-    return `<span class="pill pill-red" title="${tip}"><span class="pill-dot"></span>${pr.checks_fail} failed</span>`;
-  if (pr.checks_pending > 0)
-    return `<span class="pill pill-yellow" title="${tip}"><span class="spinner"></span>${pr.checks_pending} pending</span>`;
-  return `<span class="pill pill-green" title="${tip}"><span class="pill-dot"></span>Passing</span>`;
-}
-
 function drciPill(pr) {
   if (!pr.drci_emoji) return '<span class="pill pill-muted"><span class="pill-dot"></span>None</span>';
   const tip = escapeHtml(pr.drci_status);
@@ -807,7 +796,7 @@ function renderMyPrs() {
       <td class="mono"><a href="${escapeHtml(pr.url)}" target="_blank">#${pr.number}</a></td>
       <td class="title-cell"><a href="${escapeHtml(pr.url)}" target="_blank">${escapeHtml(pr.title)}</a></td>
       <td>${pr.is_draft ? '<span class="pill pill-muted">Draft</span>' : reviewPill(pr)}</td>
-      <td>${testsPill(pr)}</td>
+      <td>${checksOverallPill(pr)}</td>
       <td>${drciPill(pr)}</td>
       <td>${commentCell(pr)}</td>
       <td><span class="time-text" title="${escapeHtml(pr.updated_at)}">${relativeTime(pr.updated_at)}</span></td>

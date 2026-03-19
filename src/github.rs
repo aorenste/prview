@@ -9,17 +9,7 @@ const MY_PR_FIELDS: &str = "
   repository { nameWithOwner }
   state createdAt updatedAt reviewDecision
   reviews(first: 20) { nodes { author { login } state } }
-  commits(last: 1) {
-    nodes { commit { statusCheckRollup {
-      contexts(first: 100) {
-        totalCount
-        nodes {
-          ... on CheckRun { status conclusion }
-          ... on StatusContext { state }
-        }
-      }
-    } } }
-  }
+  commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } }
   comments(first: 100) { nodes { author { login } body } }
 ";
 
@@ -123,23 +113,6 @@ struct GqlCommit {
 #[derive(Deserialize)]
 struct GqlStatusCheckRollup {
     state: Option<String>,
-    contexts: Option<GqlCheckContexts>,
-}
-
-#[derive(Deserialize)]
-struct GqlCheckContexts {
-    #[serde(rename = "totalCount")]
-    total_count: i64,
-    nodes: Vec<GqlCheckNode>,
-}
-
-#[derive(Deserialize)]
-struct GqlCheckNode {
-    // CheckRun fields
-    status: Option<String>,
-    conclusion: Option<String>,
-    // StatusContext field
-    state: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -223,7 +196,6 @@ async fn run_query(search_filter: &str, fields: &str) -> Result<Vec<GqlPr>, Box<
 fn convert_prs(nodes: &[GqlPr]) -> Vec<PrInsert> {
     nodes.iter().map(|pr| {
         let (review_status, reviewers) = extract_reviews(pr);
-        let (checks_success, checks_fail, checks_pending) = extract_checks(pr);
         let (drci_emoji, drci_status) = extract_drci(pr);
         let comment_count = extract_comment_count(pr);
 
@@ -240,9 +212,6 @@ fn convert_prs(nodes: &[GqlPr]) -> Vec<PrInsert> {
             review_status,
             reviewers,
             checks_overall: extract_checks_overall(pr),
-            checks_success,
-            checks_fail,
-            checks_pending,
             drci_status,
             drci_emoji,
             comment_count,
@@ -325,65 +294,6 @@ fn extract_checks_overall(pr: &GqlPr) -> String {
         Some(r) => r.state.clone().unwrap_or_default(),
         None => String::new(),
     }
-}
-
-fn extract_checks(pr: &GqlPr) -> (i64, i64, i64) {
-    let commits = match &pr.commits {
-        Some(c) => c,
-        None => return (0, 0, 0),
-    };
-    let commit = match commits.nodes.first() {
-        Some(c) => c,
-        None => return (0, 0, 0),
-    };
-    let rollup = match &commit.commit.status_check_rollup {
-        Some(r) => r,
-        None => return (0, 0, 0),
-    };
-
-    let contexts = match &rollup.contexts {
-        Some(c) => c,
-        None => return (0, 0, 0),
-    };
-
-    let total_count = contexts.total_count;
-    let mut success: i64 = 0;
-    let mut fail: i64 = 0;
-    let mut pending: i64 = 0;
-
-    for check in &contexts.nodes {
-        // CheckRun: has status + conclusion
-        if let Some(conclusion) = &check.conclusion {
-            match conclusion.as_str() {
-                "SUCCESS" | "NEUTRAL" | "SKIPPED" => success += 1,
-                "FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE" | "ERROR" => fail += 1,
-                _ => pending += 1,
-            }
-        } else if let Some(status) = &check.status {
-            // CheckRun with no conclusion yet
-            match status.as_str() {
-                "COMPLETED" => success += 1,
-                _ => pending += 1,
-            }
-        } else if let Some(state) = &check.state {
-            // StatusContext
-            match state.as_str() {
-                "SUCCESS" | "NEUTRAL" => success += 1,
-                "FAILURE" | "ERROR" => fail += 1,
-                _ => pending += 1,
-            }
-        }
-    }
-
-    // Account for checks beyond the first 100 we fetched
-    let fetched = contexts.nodes.len() as i64;
-    let unfetched = total_count - fetched;
-    if unfetched > 0 {
-        // We don't know their state, count as pending
-        pending += unfetched;
-    }
-
-    (success, fail, pending)
 }
 
 fn extract_drci(pr: &GqlPr) -> (String, String) {
