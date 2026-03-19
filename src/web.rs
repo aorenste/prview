@@ -399,7 +399,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
   tr:hover { background: var(--bg-hover); }
   tr.hidden-row { opacity: 0.4; }
   tr.draft-row { opacity: 0.45; }
-  tr.read-row { opacity: 0.4; }
+  tr.read-row > td:not(.menu-cell) { opacity: 0.4; }
   tbody tr:last-child td { border-bottom: none; }
 
   /* Links */
@@ -471,7 +471,8 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
   }
 
   /* Menu */
-  .menu-cell { position: relative; }
+  .menu-cell { position: relative; z-index: 1; }
+  .menu-cell:has(.dropdown.open) { z-index: 20; }
   .menu-btn {
     cursor: pointer;
     border: none;
@@ -487,14 +488,13 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
     display: none;
     position: absolute;
     right: 0;
-    top: 100%;
+    bottom: 100%;
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: 8px;
     box-shadow: 0 8px 24px rgba(0,0,0,0.4);
     z-index: 10;
     white-space: nowrap;
-    overflow: hidden;
   }
   .dropdown.open { display: block; }
   .dropdown a {
