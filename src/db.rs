@@ -15,6 +15,7 @@ pub struct PrRow {
     pub review_status: String,
     pub reviewers: String,
     pub checks_overall: String,
+    pub checks_running: bool,
     pub drci_status: String,
     pub drci_emoji: String,
     pub comment_count: i64,
@@ -32,6 +33,7 @@ pub struct ReviewPrRow {
     pub review_status: String,
     pub reviewers: String,
     pub checks_overall: String,
+    pub checks_running: bool,
     pub drci_status: String,
     pub drci_emoji: String,
     pub comment_count: i64,
@@ -53,6 +55,7 @@ pub struct PrInsert {
     pub review_status: String,
     pub reviewers: String,
     pub checks_overall: String,
+    pub checks_running: bool,
     pub drci_status: String,
     pub drci_emoji: String,
     pub comment_count: i64,
@@ -60,7 +63,7 @@ pub struct PrInsert {
     pub ci_approval_needed: bool,
 }
 
-const CURRENT_VERSION: i64 = 8;
+const CURRENT_VERSION: i64 = 9;
 
 /// Each entry migrates from version (index) to version (index + 1).
 const MIGRATIONS: &[&str] = &[
@@ -220,6 +223,9 @@ const MIGRATIONS: &[&str] = &[
         ci_approval_needed INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (target_user, repo, number)
      )",
+    // 8 -> 9: add checks_running to both tables
+    "ALTER TABLE prs ADD COLUMN checks_running INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE review_prs ADD COLUMN checks_running INTEGER NOT NULL DEFAULT 0",
 ];
 
 pub fn init_db(path: &Path) -> Connection {
@@ -293,18 +299,18 @@ pub fn replace_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Result<()
     conn.execute("DELETE FROM prs WHERE target_user = ?1", rusqlite::params![user])?;
     let mut stmt = conn.prepare(
         "INSERT INTO prs (target_user, number, repo, title, url, state, created_at, updated_at, hidden,
-                          is_draft, review_status, reviewers, checks_overall,
+                          is_draft, review_status, reviewers, checks_overall, checks_running,
                           drci_status, drci_emoji, comment_count)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
                  COALESCE((SELECT hidden FROM temp.hidden_state WHERE target_user = ?1 AND repo = ?3 AND number = ?2), 0),
-                 ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                 ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
     )?;
     for pr in prs {
         stmt.execute(rusqlite::params![
             user,
             pr.number, pr.repo, pr.title, pr.url, pr.state, pr.created_at, pr.updated_at,
             pr.is_draft as i64,
-            pr.review_status, pr.reviewers, pr.checks_overall,
+            pr.review_status, pr.reviewers, pr.checks_overall, pr.checks_running as i64,
             pr.drci_status, pr.drci_emoji, pr.comment_count,
         ])?;
     }
@@ -315,12 +321,12 @@ pub fn replace_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Result<()
 pub fn list_prs(conn: &Connection, show_hidden: bool, user: &str) -> Vec<PrRow> {
     let sql = if show_hidden {
         "SELECT repo, number, title, url, updated_at, hidden, is_draft,
-                review_status, reviewers, checks_overall,
+                review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count
          FROM prs WHERE target_user = ?1 ORDER BY updated_at DESC"
     } else {
         "SELECT repo, number, title, url, updated_at, hidden, is_draft,
-                review_status, reviewers, checks_overall,
+                review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count
          FROM prs WHERE target_user = ?1 AND hidden = 0 ORDER BY updated_at DESC"
     };
@@ -337,9 +343,10 @@ pub fn list_prs(conn: &Connection, show_hidden: bool, user: &str) -> Vec<PrRow> 
             review_status: row.get(7)?,
             reviewers: row.get(8)?,
             checks_overall: row.get(9)?,
-            drci_status: row.get(10)?,
-            drci_emoji: row.get(11)?,
-            comment_count: row.get(12)?,
+            checks_running: row.get::<_, i64>(10)? != 0,
+            drci_status: row.get(11)?,
+            drci_emoji: row.get(12)?,
+            comment_count: row.get(13)?,
         })
     })
     .unwrap()
@@ -350,7 +357,7 @@ pub fn list_prs(conn: &Connection, show_hidden: bool, user: &str) -> Vec<PrRow> 
 pub fn get_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> Option<PrRow> {
     conn.query_row(
         "SELECT repo, number, title, url, updated_at, hidden, is_draft,
-                review_status, reviewers, checks_overall,
+                review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count
          FROM prs WHERE target_user = ?1 AND repo = ?2 AND number = ?3",
         rusqlite::params![user, repo, number],
@@ -366,9 +373,10 @@ pub fn get_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> Option<
                 review_status: row.get(7)?,
                 reviewers: row.get(8)?,
                 checks_overall: row.get(9)?,
-                drci_status: row.get(10)?,
-                drci_emoji: row.get(11)?,
-                comment_count: row.get(12)?,
+                checks_running: row.get::<_, i64>(10)? != 0,
+                drci_status: row.get(11)?,
+                drci_emoji: row.get(12)?,
+                comment_count: row.get(13)?,
             })
         },
     )
@@ -404,17 +412,17 @@ pub fn replace_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Re
     let mut stmt = conn.prepare(
         "INSERT INTO review_prs (target_user, number, repo, title, url, state, created_at, updated_at,
                                   author, is_draft,
-                                  review_status, reviewers, checks_overall,
+                                  review_status, reviewers, checks_overall, checks_running,
                                   drci_status, drci_emoji, comment_count, head_sha,
                                   ci_approval_needed)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
     )?;
     for pr in prs {
         stmt.execute(rusqlite::params![
             user,
             pr.number, pr.repo, pr.title, pr.url, pr.state, pr.created_at, pr.updated_at,
             pr.author, pr.is_draft as i64,
-            pr.review_status, pr.reviewers, pr.checks_overall,
+            pr.review_status, pr.reviewers, pr.checks_overall, pr.checks_running as i64,
             pr.drci_status, pr.drci_emoji, pr.comment_count, pr.head_sha,
             pr.ci_approval_needed as i64,
         ])?;
@@ -452,7 +460,7 @@ pub fn replace_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Re
 pub fn list_review_prs(conn: &Connection, user: &str) -> Vec<ReviewPrRow> {
     let mut stmt = conn.prepare(
         "SELECT repo, number, title, url, author, is_draft, is_read,
-                review_status, reviewers, checks_overall,
+                review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count, head_sha,
                 updated_at, ci_approval_needed
          FROM review_prs WHERE target_user = ?1
@@ -470,12 +478,13 @@ pub fn list_review_prs(conn: &Connection, user: &str) -> Vec<ReviewPrRow> {
             review_status: row.get(7)?,
             reviewers: row.get(8)?,
             checks_overall: row.get(9)?,
-            drci_status: row.get(10)?,
-            drci_emoji: row.get(11)?,
-            comment_count: row.get(12)?,
-            head_sha: row.get(13)?,
-            updated_at: row.get(14)?,
-            ci_approval_needed: row.get::<_, i64>(15)? != 0,
+            checks_running: row.get::<_, i64>(10)? != 0,
+            drci_status: row.get(11)?,
+            drci_emoji: row.get(12)?,
+            comment_count: row.get(13)?,
+            head_sha: row.get(14)?,
+            updated_at: row.get(15)?,
+            ci_approval_needed: row.get::<_, i64>(16)? != 0,
         })
     })
     .unwrap()
@@ -507,7 +516,7 @@ pub fn set_review_read(conn: &Connection, repo: &str, number: i64, read: bool, u
 pub fn get_review_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> Option<ReviewPrRow> {
     conn.query_row(
         "SELECT repo, number, title, url, author, is_draft, is_read,
-                review_status, reviewers, checks_overall,
+                review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count, head_sha,
                 updated_at, ci_approval_needed
          FROM review_prs WHERE target_user = ?1 AND repo = ?2 AND number = ?3",
@@ -524,12 +533,13 @@ pub fn get_review_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> 
                 review_status: row.get(7)?,
                 reviewers: row.get(8)?,
                 checks_overall: row.get(9)?,
-                drci_status: row.get(10)?,
-                drci_emoji: row.get(11)?,
-                comment_count: row.get(12)?,
-                head_sha: row.get(13)?,
-                updated_at: row.get(14)?,
-                ci_approval_needed: row.get::<_, i64>(15)? != 0,
+                checks_running: row.get::<_, i64>(10)? != 0,
+                drci_status: row.get(11)?,
+                drci_emoji: row.get(12)?,
+                comment_count: row.get(13)?,
+                head_sha: row.get(14)?,
+                updated_at: row.get(15)?,
+                ci_approval_needed: row.get::<_, i64>(16)? != 0,
             })
         },
     )

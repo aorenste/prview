@@ -9,7 +9,11 @@ const MY_PR_FIELDS: &str = "
   repository { nameWithOwner }
   state createdAt updatedAt reviewDecision
   reviews(first: 20) { nodes { author { login } state } }
-  commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } }
+  commits(last: 1) { nodes { commit {
+    oid
+    statusCheckRollup { state }
+    checkSuites(first: 20) { nodes { status } }
+  } } }
   comments(first: 100) { nodes { author { login } body } }
 ";
 
@@ -20,7 +24,11 @@ const REVIEW_PR_FIELDS: &str = "
   repository { nameWithOwner }
   state createdAt updatedAt reviewDecision
   reviews(first: 20) { nodes { author { login } state } }
-  commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } }
+  commits(last: 1) { nodes { commit {
+    oid
+    statusCheckRollup { state }
+    checkSuites(first: 20) { nodes { status } }
+  } } }
   comments { totalCount }
 ";
 
@@ -108,11 +116,18 @@ struct GqlCommit {
     oid: Option<String>,
     #[serde(rename = "statusCheckRollup")]
     status_check_rollup: Option<GqlStatusCheckRollup>,
+    #[serde(rename = "checkSuites")]
+    check_suites: Option<GqlNodes<GqlCheckSuite>>,
 }
 
 #[derive(Deserialize)]
 struct GqlStatusCheckRollup {
     state: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GqlCheckSuite {
+    status: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -212,6 +227,7 @@ fn convert_prs(nodes: &[GqlPr]) -> Vec<PrInsert> {
             review_status,
             reviewers,
             checks_overall: extract_checks_overall(pr),
+            checks_running: extract_checks_running(pr),
             drci_status,
             drci_emoji,
             comment_count,
@@ -306,6 +322,24 @@ fn extract_checks_overall(pr: &GqlPr) -> String {
         Some(r) => r.state.clone().unwrap_or_default(),
         None => String::new(),
     }
+}
+
+fn extract_checks_running(pr: &GqlPr) -> bool {
+    let commits = match &pr.commits {
+        Some(c) => c,
+        None => return false,
+    };
+    let commit = match commits.nodes.first() {
+        Some(c) => c,
+        None => return false,
+    };
+    let suites = match &commit.commit.check_suites {
+        Some(s) => s,
+        None => return false,
+    };
+    suites.nodes.iter().any(|s| {
+        matches!(s.status.as_deref(), Some("IN_PROGRESS") | Some("WAITING"))
+    })
 }
 
 fn extract_drci(pr: &GqlPr) -> (String, String) {

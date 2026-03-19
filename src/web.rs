@@ -738,8 +738,11 @@ function checksOverallPill(pr) {
   if (!pr.checks_overall) return '<span class="pill pill-muted"><span class="pill-dot"></span>None</span>';
   if (pr.checks_overall === 'SUCCESS')
     return '<span class="pill pill-green" title="Checks passed"><span class="pill-dot"></span>Passing</span>';
-  if (pr.checks_overall === 'FAILURE' || pr.checks_overall === 'ERROR')
+  if (pr.checks_overall === 'FAILURE' || pr.checks_overall === 'ERROR') {
+    if (pr.checks_running)
+      return '<span class="pill pill-red" title="Checks failing, still running"><span class="spinner" style="border-color: var(--red); border-top-color: transparent;"></span>Failed</span>';
     return '<span class="pill pill-red" title="Checks failed"><span class="pill-dot"></span>Failed</span>';
+  }
   return '<span class="pill pill-yellow" title="Checks pending"><span class="spinner"></span>Pending</span>';
 }
 
