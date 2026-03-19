@@ -470,6 +470,12 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
     height: 14px;
   }
 
+  /* Sortable headers */
+  th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+  th.sortable:hover { color: var(--text); }
+  th.sortable .sort-arrow { margin-left: 4px; font-size: 0.8em; opacity: 0.5; }
+  th.sortable.sort-active .sort-arrow { opacity: 1; color: var(--accent); }
+
   /* Menu */
   .menu-cell { position: relative; z-index: 1; }
   .menu-cell:has(.dropdown.open) { z-index: 20; }
@@ -603,15 +609,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
   <div class="card">
     <div class="filter-bar" id="my-prs-filter-bar"></div>
     <table>
-      <thead>
-        <tr>
-          <th style="width:36px"></th><th>Repo</th><th>PR</th><th>Title</th>
-          <th>Review</th>
-          <th>CI</th>
-          <th>DrCI</th>
-          <th>Comments</th>
-          <th>Updated</th>
-        </tr>
+      <thead id="my-prs-thead">
       </thead>
       <tbody id="my-prs-body">
         <tr><td colspan="9" class="empty-state">Connecting...</td></tr>
@@ -624,15 +622,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
   <div class="card">
     <div class="filter-bar" id="reviews-filter-bar"></div>
     <table>
-      <thead>
-        <tr>
-          <th style="width:36px"></th><th>Repo</th><th>PR</th><th>Title</th><th>Author</th>
-          <th>Review</th>
-          <th>CI</th>
-          <th>Comments</th>
-          <th>Updated</th>
-          <th style="width:40px"></th>
-        </tr>
+      <thead id="reviews-thead">
       </thead>
       <tbody id="reviews-body">
         <tr><td colspan="10" class="empty-state">Connecting...</td></tr>
@@ -663,6 +653,73 @@ let showHidden = loadPref('showHidden', false);
 let showDrafts = loadPref('showDrafts', false);
 let showApproved = loadPref('showApproved', false);
 let showRejected = loadPref('showRejected', false);
+
+// --- Sort state ---
+function loadSortPref(key, defaultCol, defaultDir) {
+  try {
+    const v = getCookie('prview_sort_' + key);
+    if (v) { const [col, dir] = v.split(':'); return { col, dir }; }
+  } catch {}
+  return { col: defaultCol, dir: defaultDir };
+}
+function saveSortPref(key, col, dir) {
+  setCookie('prview_sort_' + key, col + ':' + dir);
+}
+
+let myPrsSort = loadSortPref('my', 'updated_at', 'desc');
+let reviewsSort = loadSortPref('reviews', 'updated_at', 'desc');
+
+const myPrsCols = [
+  { key: null, label: '', style: 'width:36px' },
+  { key: 'repo', label: 'Repo' },
+  { key: 'number', label: 'PR' },
+  { key: 'title', label: 'Title' },
+  { key: 'review_status', label: 'Review' },
+  { key: 'checks_overall', label: 'CI' },
+  { key: 'drci_emoji', label: 'DrCI' },
+  { key: 'comment_count', label: 'Comments' },
+  { key: 'updated_at', label: 'Updated' },
+];
+const reviewsCols = [
+  { key: null, label: '', style: 'width:36px' },
+  { key: 'repo', label: 'Repo' },
+  { key: 'number', label: 'PR' },
+  { key: 'title', label: 'Title' },
+  { key: 'author', label: 'Author' },
+  { key: 'review_status', label: 'Review' },
+  { key: 'checks_overall', label: 'CI' },
+  { key: 'comment_count', label: 'Comments' },
+  { key: 'updated_at', label: 'Updated' },
+  { key: null, label: '', style: 'width:40px' },
+];
+
+function renderHeaders(theadId, cols, sortState, onSort) {
+  const thead = document.getElementById(theadId);
+  thead.innerHTML = '<tr>' + cols.map(c => {
+    if (!c.key) return `<th${c.style ? ' style="' + c.style + '"' : ''}></th>`;
+    const active = sortState.col === c.key;
+    const arrow = active ? (sortState.dir === 'asc' ? '\u25b2' : '\u25bc') : '\u25b4';
+    const cls = 'sortable' + (active ? ' sort-active' : '');
+    return `<th class="${cls}" data-sort="${c.key}"${c.style ? ' style="' + c.style + '"' : ''}>${c.label}<span class="sort-arrow">${arrow}</span></th>`;
+  }).join('') + '</tr>';
+  thead.querySelectorAll('th.sortable').forEach(th => {
+    th.onclick = () => onSort(th.dataset.sort);
+  });
+}
+
+function genericCompare(a, b, col) {
+  let va = a[col], vb = b[col];
+  if (va == null) va = '';
+  if (vb == null) vb = '';
+  if (typeof va === 'number' && typeof vb === 'number') return va - vb;
+  if (typeof va === 'boolean' && typeof vb === 'boolean') return (va ? 1 : 0) - (vb ? 1 : 0);
+  return String(va).localeCompare(String(vb));
+}
+
+function sortList(list, sortState) {
+  const dir = sortState.dir === 'asc' ? 1 : -1;
+  list.sort((a, b) => dir * genericCompare(a, b, sortState.col));
+}
 
 // --- Tabs ---
 function activateTab(id) {
@@ -764,7 +821,16 @@ function commentCell(pr) {
 function prKey(pr) { return pr.repo + '#' + pr.number; }
 
 // --- My PRs tab ---
+function toggleMyPrsSort(col) {
+  if (myPrsSort.col === col) myPrsSort.dir = myPrsSort.dir === 'asc' ? 'desc' : 'asc';
+  else { myPrsSort.col = col; myPrsSort.dir = 'desc'; }
+  saveSortPref('my', myPrsSort.col, myPrsSort.dir);
+  sortList(allPrs, myPrsSort);
+  renderMyPrs();
+}
+
 function renderMyPrs() {
+  renderHeaders('my-prs-thead', myPrsCols, myPrsSort, toggleMyPrsSort);
   const visible = showHidden ? allPrs : allPrs.filter(p => !p.hidden);
   const tbody = document.getElementById('my-prs-body');
   const bar = document.getElementById('my-prs-filter-bar');
@@ -821,7 +887,16 @@ function renderMyPrs() {
 }
 
 // --- Reviews tab ---
+function toggleReviewsSort(col) {
+  if (reviewsSort.col === col) reviewsSort.dir = reviewsSort.dir === 'asc' ? 'desc' : 'asc';
+  else { reviewsSort.col = col; reviewsSort.dir = 'desc'; }
+  saveSortPref('reviews', reviewsSort.col, reviewsSort.dir);
+  sortList(allReviewPrs, reviewsSort);
+  renderReviews();
+}
+
 function renderReviews() {
+  renderHeaders('reviews-thead', reviewsCols, reviewsSort, toggleReviewsSort);
   let visible = allReviewPrs;
   if (!showDrafts) visible = visible.filter(p => !p.is_draft);
   if (!showApproved) visible = visible.filter(p => p.review_status !== 'APPROVED');
@@ -947,8 +1022,7 @@ function applyUpdate(batch) {
       allPrs = allPrs.filter(p => prKey(p) !== key);
     }
   }
-  allPrs.sort((a, b) => (a.is_draft ? 1 : 0) - (b.is_draft ? 1 : 0)
-    || b.updated_at.localeCompare(a.updated_at));
+  sortList(allPrs, myPrsSort);
 
   for (const u of batch.review_updates) {
     if (u.type === 'changed') {
@@ -961,8 +1035,7 @@ function applyUpdate(batch) {
       allReviewPrs = allReviewPrs.filter(p => prKey(p) !== key);
     }
   }
-  allReviewPrs.sort((a, b) => (b.ci_approval_needed ? 1 : 0) - (a.ci_approval_needed ? 1 : 0)
-    || (b.updated_at || '').localeCompare(a.updated_at || ''));
+  sortList(allReviewPrs, reviewsSort);
 
   renderAll();
 }
@@ -1087,11 +1160,9 @@ function connectSSE() {
     const data = JSON.parse(e.data);
     checkBuildHash(data.build_hash);
     allPrs = data.prs;
-    allPrs.sort((a, b) => (a.is_draft ? 1 : 0) - (b.is_draft ? 1 : 0)
-      || b.updated_at.localeCompare(a.updated_at));
+    sortList(allPrs, myPrsSort);
     allReviewPrs = data.review_prs;
-    allReviewPrs.sort((a, b) => (b.ci_approval_needed ? 1 : 0) - (a.ci_approval_needed ? 1 : 0)
-      || (b.updated_at || '').localeCompare(a.updated_at || ''));
+    sortList(allReviewPrs, reviewsSort);
     hiddenCount = data.hidden_count;
     hasFetched = (allPrs.length > 0 || allReviewPrs.length > 0);
     renderAll();
