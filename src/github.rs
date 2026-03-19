@@ -243,12 +243,24 @@ pub async fn fetch_all_prs(user: &str) -> Result<FetchResult, Box<dyn std::error
     let user_filter = if user.is_empty() { "@me".to_string() } else { user.to_string() };
     let my_query = format!("is:pr is:open author:{}", user_filter);
     let review_query = format!("is:pr is:open review-requested:{}", user_filter);
-    let (my_nodes, review_nodes) = tokio::try_join!(
+    let reviewed_query = format!("is:pr is:open reviewed-by:{} -author:{}", user_filter, user_filter);
+    let (my_nodes, review_nodes, reviewed_nodes) = tokio::try_join!(
         run_query(&my_query, MY_PR_FIELDS),
         run_query(&review_query, REVIEW_PR_FIELDS),
+        run_query(&reviewed_query, REVIEW_PR_FIELDS),
     )?;
 
-    let mut review_prs = convert_prs(&review_nodes);
+    // Merge review-requested and reviewed-by, deduplicating by (repo, number)
+    let mut seen = std::collections::HashSet::new();
+    let mut all_review_nodes = Vec::new();
+    for node in review_nodes.into_iter().chain(reviewed_nodes.into_iter()) {
+        let key = (node.repository.name_with_owner.clone(), node.number);
+        if seen.insert(key) {
+            all_review_nodes.push(node);
+        }
+    }
+
+    let mut review_prs = convert_prs(&all_review_nodes);
 
     // Check CI approval status for review PRs in parallel
     let futures: Vec<_> = review_prs.iter()
