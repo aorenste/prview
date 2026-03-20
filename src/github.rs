@@ -32,6 +32,15 @@ const REVIEW_PR_FIELDS: &str = "
   comments { totalCount }
 ";
 
+const LANDED_PR_FIELDS: &str = "
+  number title url
+  repository { nameWithOwner }
+  state mergedAt closedAt
+  timelineItems(last: 1, itemTypes: [CLOSED_EVENT]) {
+    nodes { ... on ClosedEvent { closer { ... on Commit { __typename } } } }
+  }
+";
+
 // GraphQL response types
 
 #[derive(Deserialize)]
@@ -65,19 +74,27 @@ struct GqlPr {
     title: String,
     url: String,
     author: Option<GqlAuthor>,
-    #[serde(rename = "isDraft")]
+    #[serde(default, rename = "isDraft")]
     is_draft: bool,
     repository: GqlRepo,
+    #[serde(default)]
     state: String,
-    #[serde(rename = "createdAt")]
+    #[serde(default, rename = "createdAt")]
     created_at: String,
-    #[serde(rename = "updatedAt")]
+    #[serde(default, rename = "updatedAt")]
     updated_at: String,
     #[serde(rename = "reviewDecision")]
     review_decision: Option<String>,
+    #[serde(default)]
     reviews: GqlNodes<GqlReview>,
     commits: Option<GqlNodes<GqlCommitNode>>,
     comments: Option<GqlNodes<GqlComment>>,
+    #[serde(default, rename = "mergedAt")]
+    merged_at: Option<String>,
+    #[serde(default, rename = "closedAt")]
+    closed_at: Option<String>,
+    #[serde(default, rename = "timelineItems")]
+    timeline_items: Option<GqlNodes<GqlTimelineItem>>,
 }
 
 #[derive(Deserialize)]
@@ -87,6 +104,12 @@ struct GqlNodes<T> {
     nodes: Vec<T>,
     #[serde(default, rename = "totalCount")]
     total_count: Option<i64>,
+}
+
+impl<T> Default for GqlNodes<T> {
+    fn default() -> Self {
+        GqlNodes { nodes: Vec::new(), total_count: None }
+    }
 }
 
 #[derive(Deserialize)]
@@ -136,9 +159,24 @@ struct GqlComment {
     body: String,
 }
 
+#[derive(Deserialize)]
+struct GqlTimelineItem {
+    #[serde(default)]
+    closer: Option<GqlCloser>,
+}
+
+#[derive(Deserialize)]
+struct GqlCloser {
+    #[serde(default, rename = "__typename")]
+    typename: Option<String>,
+}
+
+use crate::db::MergedPrRow;
+
 pub struct FetchResult {
     pub my_prs: Vec<PrInsert>,
     pub review_prs: Vec<PrInsert>,
+    pub merged_prs: Vec<MergedPrRow>,
 }
 
 fn make_query(search_filter: &str, fields: &str, cursor: Option<&str>) -> String {
@@ -287,10 +325,81 @@ pub async fn fetch_all_prs(user: &str) -> Result<FetchResult, Box<dyn std::error
         pr.ci_approval_needed = needed;
     }
 
+    // Fetch landed PRs separately so failure doesn't block open/review PRs
+    let seven_days_ago = {
+        let now = std::time::SystemTime::now();
+        let seven_days = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+        let then = now.duration_since(std::time::UNIX_EPOCH).unwrap() - seven_days;
+        let secs = then.as_secs();
+        let days = secs / 86400;
+        // Convert days since epoch to YYYY-MM-DD
+        let (y, m, d) = days_to_ymd(days as i64);
+        format!("{:04}-{:02}-{:02}", y, m, d)
+    };
+    let landed_query = format!("is:pr author:{} closed:>{}", user_filter, seven_days_ago);
+    let merged_prs = match run_query(&landed_query, LANDED_PR_FIELDS).await {
+        Ok(nodes) => convert_landed_prs(&nodes),
+        Err(e) => {
+            eprintln!("Warning: failed to fetch landed PRs: {}", e);
+            vec![]
+        }
+    };
+
     Ok(FetchResult {
         my_prs: convert_prs(&my_nodes),
         review_prs,
+        merged_prs,
     })
+}
+
+fn days_to_ymd(days_since_epoch: i64) -> (i64, i64, i64) {
+    // Algorithm from https://howardhinnant.github.io/date_algorithms.html
+    let z = days_since_epoch + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m as i64, d as i64)
+}
+
+fn convert_landed_prs(nodes: &[GqlPr]) -> Vec<MergedPrRow> {
+    nodes.iter().filter_map(|pr| {
+        // Native merge: mergedAt is set
+        if let Some(merged_at) = &pr.merged_at {
+            return Some(MergedPrRow {
+                repo: pr.repository.name_with_owner.clone(),
+                number: pr.number,
+                title: pr.title.clone(),
+                url: pr.url.clone(),
+                landed_at: merged_at.clone(),
+            });
+        }
+
+        // Pytorchmergebot workflow: ClosedEvent with closer of type Commit
+        if let Some(timeline) = &pr.timeline_items {
+            if let Some(item) = timeline.nodes.last() {
+                if let Some(closer) = &item.closer {
+                    if closer.typename.as_deref() == Some("Commit") {
+                        let landed_at = pr.closed_at.clone().unwrap_or_default();
+                        return Some(MergedPrRow {
+                            repo: pr.repository.name_with_owner.clone(),
+                            number: pr.number,
+                            title: pr.title.clone(),
+                            url: pr.url.clone(),
+                            landed_at,
+                        });
+                    }
+                }
+            }
+        }
+
+        None // Manually closed, not landed
+    }).collect()
 }
 
 fn extract_reviews(pr: &GqlPr) -> (String, String) {

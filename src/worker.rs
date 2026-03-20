@@ -31,6 +31,8 @@ pub struct UpdateBatch {
     pub target_user: String,
     pub pr_updates: Vec<PrUpdate>,
     pub review_updates: Vec<ReviewPrUpdate>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub merged_prs: Vec<db::MergedPrRow>,
     pub hidden_count: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -70,6 +72,7 @@ pub async fn fetch_prs_loop(
                         target_user: user.clone(),
                         pr_updates: vec![],
                         review_updates: vec![],
+                        merged_prs: vec![],
                         hidden_count: 0,
                         error: Some(e.to_string()),
                     });
@@ -154,6 +157,7 @@ pub async fn fetch_details_loop(
                                 target_user: user.clone(),
                                 pr_updates: vec![PrUpdate::Changed(pr)],
                                 review_updates: vec![],
+                                merged_prs: vec![],
                                 hidden_count,
                                 error: None,
                             });
@@ -187,6 +191,7 @@ pub async fn fetch_details_loop(
                                 target_user: user.clone(),
                                 pr_updates: vec![],
                                 review_updates: vec![ReviewPrUpdate::Changed(pr)],
+                                merged_prs: vec![],
                                 hidden_count,
                                 error: None,
                             });
@@ -286,6 +291,21 @@ async fn fetch_and_store(
         }
     }
 
+    // Store merged PRs and compute diff
+    let old_merged: Vec<db::MergedPrRow> = {
+        let conn = db.lock().unwrap();
+        db::list_merged_prs(&conn, user)
+    };
+    {
+        let conn = db.lock().unwrap();
+        let _ = db::replace_merged_prs(&conn, &result.merged_prs, user);
+    }
+    let new_merged: Vec<db::MergedPrRow> = {
+        let conn = db.lock().unwrap();
+        db::list_merged_prs(&conn, user)
+    };
+    let merged_prs = if old_merged != new_merged { new_merged } else { vec![] };
+
     let hidden_count = {
         let conn = db.lock().unwrap();
         db::hidden_count(&conn, user)
@@ -294,6 +314,7 @@ async fn fetch_and_store(
         target_user: user.to_string(),
         pr_updates,
         review_updates,
+        merged_prs,
         hidden_count,
         error: None,
     });

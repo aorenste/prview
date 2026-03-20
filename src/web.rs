@@ -28,6 +28,7 @@ struct InitPayload {
     build_hash: String,
     prs: Vec<db::PrRow>,
     review_prs: Vec<db::ReviewPrRow>,
+    merged_prs: Vec<db::MergedPrRow>,
     hidden_count: i64,
 }
 
@@ -110,8 +111,9 @@ pub async fn events(
         let conn = db.lock().unwrap();
         let prs = db::list_prs(&conn, true, &user);
         let review_prs = db::list_review_prs(&conn, &user);
+        let merged_prs = db::list_merged_prs(&conn, &user);
         let hidden_count = db::hidden_count(&conn, &user);
-        let init = InitPayload { build_hash: hash.as_ref().clone(), prs, review_prs, hidden_count };
+        let init = InitPayload { build_hash: hash.as_ref().clone(), prs, review_prs, merged_prs, hidden_count };
         (serde_json::to_string(&init).unwrap(), tx.subscribe())
     };
 
@@ -182,6 +184,7 @@ pub async fn api_toggle_hidden(db: Db, tx: Tx, body: web::Json<ToggleRequest>) -
             target_user: user,
             pr_updates: vec![crate::worker::PrUpdate::Changed(pr)],
             review_updates: vec![],
+            merged_prs: vec![],
             hidden_count,
             error: None,
         };
@@ -209,6 +212,7 @@ pub async fn api_toggle_review_read(db: Db, tx: Tx, body: web::Json<ToggleReadRe
             target_user: user,
             pr_updates: vec![],
             review_updates: vec![crate::worker::ReviewPrUpdate::Changed(pr)],
+            merged_prs: vec![],
             hidden_count,
             error: None,
         };
@@ -634,6 +638,49 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
   }
   .user-input:focus { border-color: var(--accent); }
   .user-input.active-user { border-color: var(--accent); color: var(--accent); }
+
+  /* Recently Landed section */
+  .landed-section {
+    margin-top: 16px;
+  }
+  .landed-toggle {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 13px;
+    cursor: pointer;
+    padding: 8px 4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .landed-toggle:hover { color: var(--text); }
+  #landed-arrow {
+    font-size: 10px;
+    transition: transform 0.15s;
+    display: inline-block;
+  }
+  #landed-arrow.open { transform: rotate(90deg); }
+  .landed-count {
+    background: var(--bg-header);
+    color: var(--text-muted);
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 9999px;
+  }
+  .landed-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  .landed-table td {
+    padding: 6px 10px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+  }
+  .landed-table a { color: var(--text-muted); text-decoration: none; }
+  .landed-table a:hover { color: var(--text); text-decoration: underline; }
+  .landed-table .title-cell { max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -666,6 +713,16 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
       </tbody>
     </table>
   </div>
+  <div id="landed-section" class="landed-section" style="display:none">
+    <button class="landed-toggle" id="landed-toggle" onclick="toggleLanded()">
+      <span id="landed-arrow">&#9654;</span> Recently Landed <span class="landed-count" id="landed-count">0</span>
+    </button>
+    <div id="landed-body" style="display:none">
+      <table class="landed-table">
+        <tbody id="landed-tbody"></tbody>
+      </table>
+    </div>
+  </div>
 </div>
 
 <div id="reviews-panel" class="tab-panel">
@@ -686,6 +743,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
 let buildHash = null;
 let allPrs = [];
 let allReviewPrs = [];
+let allMergedPrs = [];
 let hiddenCount = 0;
 let hasFetched = false;
 
@@ -973,6 +1031,48 @@ function renderMyPrs() {
   }).join('');
 }
 
+// --- Recently Landed ---
+let landedOpen = loadPref('landedOpen', false);
+
+function toggleLanded() {
+  landedOpen = !landedOpen;
+  savePref('landedOpen', landedOpen);
+  renderLanded();
+}
+
+function renderLanded() {
+  const section = document.getElementById('landed-section');
+  const body = document.getElementById('landed-body');
+  const arrow = document.getElementById('landed-arrow');
+  const count = document.getElementById('landed-count');
+
+  if (allMergedPrs.length === 0) {
+    section.style.display = 'none';
+    return;
+  }
+  section.style.display = '';
+  count.textContent = allMergedPrs.length;
+
+  if (landedOpen) {
+    arrow.classList.add('open');
+    body.style.display = '';
+    const tbody = document.getElementById('landed-tbody');
+    tbody.innerHTML = allMergedPrs.map(pr => {
+      const repo = escapeHtml(pr.repo);
+      const shortRepo = repo.split('/').pop();
+      return `<tr>
+        <td><span class="repo-text">${shortRepo}</span></td>
+        <td class="mono"><a href="${escapeHtml(pr.url)}" target="_blank">#${pr.number}</a></td>
+        <td class="title-cell"><a href="${escapeHtml(pr.url)}" target="_blank">${escapeHtml(pr.title)}</a></td>
+        <td><span class="time-text" title="${escapeHtml(pr.landed_at)}">${relativeTime(pr.landed_at)}</span></td>
+      </tr>`;
+    }).join('');
+  } else {
+    arrow.classList.remove('open');
+    body.style.display = 'none';
+  }
+}
+
 // --- Reviews tab ---
 function toggleReviewsSort(col) {
   if (reviewsSort.col === col) reviewsSort.dir = reviewsSort.dir === 'asc' ? 'desc' : 'asc';
@@ -1083,6 +1183,7 @@ function renderReviews() {
 
 function renderAll() {
   renderMyPrs();
+  renderLanded();
   renderReviews();
 }
 
@@ -1124,6 +1225,10 @@ function applyUpdate(batch) {
     }
   }
   sortList(allReviewPrs, reviewsSort);
+
+  if (batch.merged_prs && batch.merged_prs.length > 0) {
+    allMergedPrs = batch.merged_prs;
+  }
 
   renderAll();
 }
@@ -1213,6 +1318,7 @@ function setUser(user) {
   }
   allPrs = [];
   allReviewPrs = [];
+  allMergedPrs = [];
   hiddenCount = 0;
   hasFetched = false;
   renderAll();
@@ -1251,6 +1357,7 @@ function connectSSE() {
     sortList(allPrs, myPrsSort);
     allReviewPrs = data.review_prs;
     sortList(allReviewPrs, reviewsSort);
+    allMergedPrs = data.merged_prs || [];
     hiddenCount = data.hidden_count;
     hasFetched = (allPrs.length > 0 || allReviewPrs.length > 0);
     renderAll();

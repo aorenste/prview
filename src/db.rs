@@ -70,7 +70,16 @@ pub struct PrInsert {
     pub ci_approval_needed: bool,
 }
 
-const CURRENT_VERSION: i64 = 10;
+#[derive(Clone, Serialize, PartialEq)]
+pub struct MergedPrRow {
+    pub repo: String,
+    pub number: i64,
+    pub title: String,
+    pub url: String,
+    pub landed_at: String,
+}
+
+const CURRENT_VERSION: i64 = 11;
 
 /// Each entry migrates from version (index) to version (index + 1).
 const MIGRATIONS: &[&str] = &[
@@ -243,6 +252,16 @@ const MIGRATIONS: &[&str] = &[
      ALTER TABLE review_prs ADD COLUMN checks_fail INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE review_prs ADD COLUMN checks_pending INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE review_prs ADD COLUMN detail_updated_at TEXT NOT NULL DEFAULT ''",
+    // 10 -> 11: merged_prs table for recently landed PRs
+    "CREATE TABLE merged_prs (
+        target_user TEXT NOT NULL DEFAULT '',
+        number INTEGER NOT NULL,
+        repo TEXT NOT NULL,
+        title TEXT NOT NULL,
+        url TEXT NOT NULL,
+        landed_at TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (target_user, repo, number)
+     )",
 ];
 
 pub fn init_db(path: &Path) -> Connection {
@@ -671,4 +690,38 @@ pub fn update_review_pr_details(conn: &Connection, repo: &str, number: i64, user
             user, repo, number,
         ],
     ).ok();
+}
+
+pub fn replace_merged_prs(conn: &Connection, prs: &[MergedPrRow], user: &str) -> Result<(), rusqlite::Error> {
+    conn.execute("DELETE FROM merged_prs WHERE target_user = ?1", rusqlite::params![user])?;
+    let mut stmt = conn.prepare(
+        "INSERT INTO merged_prs (target_user, number, repo, title, url, landed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )?;
+    for pr in prs {
+        stmt.execute(rusqlite::params![
+            user, pr.number, pr.repo, pr.title, pr.url, pr.landed_at,
+        ])?;
+    }
+    Ok(())
+}
+
+pub fn list_merged_prs(conn: &Connection, user: &str) -> Vec<MergedPrRow> {
+    let mut stmt = conn.prepare(
+        "SELECT repo, number, title, url, landed_at
+         FROM merged_prs WHERE target_user = ?1
+         ORDER BY landed_at DESC",
+    ).unwrap();
+    stmt.query_map(rusqlite::params![user], |row| {
+        Ok(MergedPrRow {
+            repo: row.get(0)?,
+            number: row.get(1)?,
+            title: row.get(2)?,
+            url: row.get(3)?,
+            landed_at: row.get(4)?,
+        })
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
 }
