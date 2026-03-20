@@ -713,6 +713,19 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
       </tbody>
     </table>
   </div>
+  <div id="drafts-section" class="landed-section" style="display:none">
+    <button class="landed-toggle" id="drafts-toggle" onclick="toggleDrafts()">
+      <span id="drafts-arrow">&#9654;</span> Drafts <span class="landed-count" id="drafts-count">0</span>
+    </button>
+    <div id="drafts-body" style="display:none">
+      <div class="card">
+        <table>
+          <thead id="drafts-thead"></thead>
+          <tbody id="drafts-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
   <div id="landed-section" class="landed-section" style="display:none">
     <button class="landed-toggle" id="landed-toggle" onclick="toggleLanded()">
       <span id="landed-arrow">&#9654;</span> Recently Landed <span class="landed-count" id="landed-count">0</span>
@@ -974,9 +987,38 @@ function toggleMyPrsSort(col) {
   renderMyPrs();
 }
 
+function prRow(pr) {
+  let cls = [];
+  if (pr.hidden) cls.push('hidden-row');
+  if (pr.is_draft) cls.push('draft-row');
+  const rowClass = cls.length ? ` class="${cls.join(' ')}"` : '';
+  const checked = pr.hidden ? ' checked' : '';
+  return `<tr${rowClass} data-key="${escapeHtml(prKey(pr))}">
+    <td><input type="checkbox"${checked} onchange="toggleHidden('${escapeHtml(pr.repo)}', ${pr.number}, this.checked)" title="Hide this PR"></td>
+    <td><span class="repo-text">${escapeHtml(pr.repo)}</span></td>
+    <td class="mono"><a href="${escapeHtml(pr.url)}" target="_blank">#${pr.number}</a></td>
+    <td class="title-cell"><a href="${escapeHtml(pr.url)}" target="_blank">${escapeHtml(pr.title)}</a></td>
+    <td>${pr.is_draft ? '<span class="pill pill-muted">Draft</span>' : reviewPill(pr)}</td>
+    <td>${ciOrLandingPill(pr)}</td>
+    <td>${drciPill(pr)}</td>
+    <td>${commentCell(pr)}</td>
+    <td><span class="time-text" title="${escapeHtml(pr.updated_at)}">${relativeTime(pr.updated_at)}</span></td>
+  </tr>`;
+}
+
+let draftsOpen = loadPref('draftsOpen', true);
+
+function toggleDrafts() {
+  draftsOpen = !draftsOpen;
+  savePref('draftsOpen', draftsOpen);
+  renderMyPrs();
+}
+
 function renderMyPrs() {
   renderHeaders('my-prs-thead', myPrsCols, myPrsSort, toggleMyPrsSort);
-  const visible = showHidden ? allPrs : allPrs.filter(p => !p.hidden);
+  const all = showHidden ? allPrs : allPrs.filter(p => !p.hidden);
+  const open = all.filter(p => !p.is_draft);
+  const drafts = all.filter(p => p.is_draft);
   const tbody = document.getElementById('my-prs-body');
   const bar = document.getElementById('my-prs-filter-bar');
 
@@ -1005,30 +1047,33 @@ function renderMyPrs() {
     draftCountEl.style.display = 'none';
   }
 
-  if (visible.length === 0) {
+  if (open.length === 0) {
     tbody.innerHTML = '<tr><td colspan="9" class="empty-state">' +
       (hasFetched ? 'No open PRs' : 'Fetching...') + '</td></tr>';
-    return;
+  } else {
+    tbody.innerHTML = open.map(prRow).join('');
   }
 
-  tbody.innerHTML = visible.map(pr => {
-    let cls = [];
-    if (pr.hidden) cls.push('hidden-row');
-    if (pr.is_draft) cls.push('draft-row');
-    const rowClass = cls.length ? ` class="${cls.join(' ')}"` : '';
-    const checked = pr.hidden ? ' checked' : '';
-    return `<tr${rowClass} data-key="${escapeHtml(prKey(pr))}">
-      <td><input type="checkbox"${checked} onchange="toggleHidden('${escapeHtml(pr.repo)}', ${pr.number}, this.checked)" title="Hide this PR"></td>
-      <td><span class="repo-text">${escapeHtml(pr.repo)}</span></td>
-      <td class="mono"><a href="${escapeHtml(pr.url)}" target="_blank">#${pr.number}</a></td>
-      <td class="title-cell"><a href="${escapeHtml(pr.url)}" target="_blank">${escapeHtml(pr.title)}</a></td>
-      <td>${pr.is_draft ? '<span class="pill pill-muted">Draft</span>' : reviewPill(pr)}</td>
-      <td>${ciOrLandingPill(pr)}</td>
-      <td>${drciPill(pr)}</td>
-      <td>${commentCell(pr)}</td>
-      <td><span class="time-text" title="${escapeHtml(pr.updated_at)}">${relativeTime(pr.updated_at)}</span></td>
-    </tr>`;
-  }).join('');
+  // Drafts section
+  const draftsSection = document.getElementById('drafts-section');
+  const draftsArrow = document.getElementById('drafts-arrow');
+  const draftsBody = document.getElementById('drafts-body');
+  document.getElementById('drafts-count').textContent = drafts.length;
+
+  if (drafts.length === 0) {
+    draftsSection.style.display = 'none';
+  } else {
+    draftsSection.style.display = '';
+    if (draftsOpen) {
+      draftsArrow.classList.add('open');
+      draftsBody.style.display = '';
+      renderHeaders('drafts-thead', myPrsCols, myPrsSort, toggleMyPrsSort);
+      document.getElementById('drafts-tbody').innerHTML = drafts.map(prRow).join('');
+    } else {
+      draftsArrow.classList.remove('open');
+      draftsBody.style.display = 'none';
+    }
+  }
 }
 
 // --- Recently Landed ---
