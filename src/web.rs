@@ -806,15 +806,22 @@ function reviewPill(pr) {
 }
 
 function drciPill(pr) {
-  if (!pr.drci_emoji) return '<span class="pill pill-muted"><span class="pill-dot"></span>None</span>';
+  if (!pr.drci_emoji) {
+    if (pr.checks_pending > 0)
+      return '<span class="pill pill-yellow"><span class="spinner"></span>Pending</span>';
+    return '<span class="pill pill-muted"><span class="pill-dot"></span>None</span>';
+  }
   const tip = escapeHtml(pr.drci_status);
   const m = {
     'white_check_mark': ['pill-green', 'Passing'],
-    'x': ['pill-red', 'Failing'],
+    'x': ['pill-red', pr.checks_pending > 0 ? 'Failing' : 'Failed'],
     'hourglass_flowing_sand': ['pill-yellow', 'Running'],
   };
   const [cls, label] = m[pr.drci_emoji] || ['pill-muted', 'Unknown'];
-  const dot = cls === 'pill-yellow' ? '<span class="spinner"></span>' : '<span class="pill-dot"></span>';
+  const spinning = cls === 'pill-yellow' || (pr.checks_pending > 0);
+  const dot = spinning
+    ? `<span class="spinner"${cls === 'pill-red' ? ' style="border-color: var(--red); border-top-color: transparent;"' : ''}></span>`
+    : '<span class="pill-dot"></span>';
   return `<span class="pill ${cls}" title="${tip}">${dot}${label}</span>`;
 }
 
