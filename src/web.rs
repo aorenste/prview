@@ -454,7 +454,27 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
     font-weight: 500;
     white-space: nowrap;
     cursor: default;
+    position: relative;
   }
+  .pill[data-tip]:hover::after {
+    content: attr(data-tip);
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: #1a1a2e;
+    color: var(--text);
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 0.85em;
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 50;
+    border: 1px solid var(--border);
+    animation: tooltip-fade 0s 0.3s forwards;
+    opacity: 0;
+  }
+  @keyframes tooltip-fade { to { opacity: 1; } }
   .pill-dot {
     width: 6px;
     height: 6px;
@@ -796,12 +816,12 @@ function reviewPill(pr) {
     ? 'No reviews yet'
     : reviewers.map(r => r.login + ': ' + r.state).join('\n');
   if (pr.review_status === 'APPROVED')
-    return `<span class="pill pill-green" title="${escapeHtml(tip)}"><span class="pill-dot"></span>Approved</span>`;
+    return `<span class="pill pill-green" data-tip="${escapeHtml(tip)}"><span class="pill-dot"></span>Approved</span>`;
   if (pr.review_status === 'CHANGES_REQUESTED')
-    return `<span class="pill pill-red" title="${escapeHtml(tip)}"><span class="pill-dot"></span>Changes</span>`;
+    return `<span class="pill pill-red" data-tip="${escapeHtml(tip)}"><span class="pill-dot"></span>Changes</span>`;
   if (reviewers.length > 0)
-    return `<span class="pill pill-yellow" title="${escapeHtml(tip)}"><span class="pill-dot"></span>Pending</span>`;
-  return `<span class="pill pill-muted" title="${escapeHtml(tip)}"><span class="pill-dot"></span>None</span>`;
+    return `<span class="pill pill-yellow" data-tip="${escapeHtml(tip)}"><span class="pill-dot"></span>Pending</span>`;
+  return `<span class="pill pill-muted" data-tip="${escapeHtml(tip)}"><span class="pill-dot"></span>None</span>`;
 }
 
 function drciPill(pr) {
@@ -821,7 +841,7 @@ function drciPill(pr) {
   const dot = spinning
     ? `<span class="spinner"${cls === 'pill-red' ? ' style="border-color: var(--red); border-top-color: transparent;"' : ''}></span>`
     : '<span class="pill-dot"></span>';
-  return `<span class="pill ${cls}" title="${tip}">${dot}${label}</span>`;
+  return `<span class="pill ${cls}" data-tip="${tip}">${dot}${label}</span>`;
 }
 
 function ciApprovalPill(pr) {
@@ -832,13 +852,13 @@ function ciApprovalPill(pr) {
 function checksOverallPill(pr) {
   if (!pr.checks_overall) return '<span class="pill pill-muted"><span class="pill-dot"></span>None</span>';
   if (pr.checks_overall === 'SUCCESS')
-    return '<span class="pill pill-green" title="Checks passed"><span class="pill-dot"></span>Passing</span>';
+    return '<span class="pill pill-green" data-tip="Checks passed"><span class="pill-dot"></span>Passing</span>';
   if (pr.checks_overall === 'FAILURE' || pr.checks_overall === 'ERROR') {
     if (pr.checks_running)
-      return '<span class="pill pill-red" title="Checks failing, still running"><span class="spinner" style="border-color: var(--red); border-top-color: transparent;"></span>Failed</span>';
-    return '<span class="pill pill-red" title="Checks failed"><span class="pill-dot"></span>Failed</span>';
+      return '<span class="pill pill-red" data-tip="Checks failing, still running"><span class="spinner" style="border-color: var(--red); border-top-color: transparent;"></span>Failed</span>';
+    return '<span class="pill pill-red" data-tip="Checks failed"><span class="pill-dot"></span>Failed</span>';
   }
-  return '<span class="pill pill-yellow" title="Checks pending"><span class="spinner"></span>Pending</span>';
+  return '<span class="pill pill-yellow" data-tip="Checks pending"><span class="spinner"></span>Pending</span>';
 }
 
 function detailedCIPill(pr) {
@@ -849,20 +869,24 @@ function detailedCIPill(pr) {
     const dot = pr.checks_running
       ? '<span class="spinner" style="border-color: var(--red); border-top-color: transparent;"></span>'
       : '<span class="pill-dot"></span>';
-    return `<span class="pill pill-red" title="${escapeHtml(tip)}">${dot}${pr.checks_fail} failed</span>`;
+    return `<span class="pill pill-red" data-tip="${escapeHtml(tip)}">${dot}${pr.checks_fail} failed</span>`;
   }
   if (pr.checks_pending > 0)
-    return `<span class="pill pill-yellow" title="${escapeHtml(tip)}"><span class="spinner"></span>${pr.checks_pending} pending</span>`;
-  return `<span class="pill pill-green" title="${escapeHtml(tip)}"><span class="pill-dot"></span>Passing</span>`;
+    return `<span class="pill pill-yellow" data-tip="${escapeHtml(tip)}"><span class="spinner"></span>${pr.checks_pending} pending</span>`;
+  return `<span class="pill pill-green" data-tip="${escapeHtml(tip)}"><span class="pill-dot"></span>Passing</span>`;
 }
 
 function ciOrLandingPill(pr) {
+  const total = (pr.checks_success || 0) + (pr.checks_fail || 0) + (pr.checks_pending || 0);
+  const tip = total > 0
+    ? escapeHtml(`${pr.checks_success} passed, ${pr.checks_fail} failed, ${pr.checks_pending} pending`)
+    : '';
   if (pr.landing_status === 'landing')
-    return '<span class="pill pill-yellow"><span class="spinner"></span>Landing</span>';
+    return `<span class="pill pill-yellow" data-tip="${tip}"><span class="spinner"></span>Landing</span>`;
   if (pr.landing_status === 'reverted')
-    return '<span class="pill pill-red"><span class="pill-dot"></span>Reverted</span>';
+    return `<span class="pill pill-red" data-tip="${tip}"><span class="pill-dot"></span>Reverted</span>`;
   if (pr.landing_status === 'failed')
-    return '<span class="pill pill-red"><span class="pill-dot"></span>Land Failed</span>';
+    return `<span class="pill pill-red" data-tip="${tip}"><span class="pill-dot"></span>Land Failed</span>`;
   return detailedCIPill(pr);
 }
 
