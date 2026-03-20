@@ -642,7 +642,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
       <thead id="my-prs-thead">
       </thead>
       <tbody id="my-prs-body">
-        <tr><td colspan="10" class="empty-state">Connecting...</td></tr>
+        <tr><td colspan="9" class="empty-state">Connecting...</td></tr>
       </tbody>
     </table>
   </div>
@@ -707,7 +707,6 @@ const myPrsCols = [
   { key: 'review_status', label: 'Review' },
   { key: 'checks_overall', label: 'CI' },
   { key: 'drci_emoji', label: 'DrCI' },
-  { key: 'landing_status', label: 'Land' },
   { key: 'comment_count', label: 'Comments' },
   { key: 'updated_at', label: 'Updated' },
 ];
@@ -857,15 +856,14 @@ function detailedCIPill(pr) {
   return `<span class="pill pill-green" title="${escapeHtml(tip)}"><span class="pill-dot"></span>Passing</span>`;
 }
 
-function landingPill(pr) {
-  if (!pr.landing_status) return '';
+function ciOrLandingPill(pr) {
   if (pr.landing_status === 'landing')
     return '<span class="pill pill-yellow"><span class="spinner"></span>Landing</span>';
   if (pr.landing_status === 'reverted')
     return '<span class="pill pill-red"><span class="pill-dot"></span>Reverted</span>';
   if (pr.landing_status === 'failed')
     return '<span class="pill pill-red"><span class="pill-dot"></span>Land Failed</span>';
-  return '';
+  return detailedCIPill(pr);
 }
 
 function reviewStatusPill(pr) {
@@ -926,7 +924,7 @@ function renderMyPrs() {
   }
 
   if (visible.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="10" class="empty-state">' +
+    tbody.innerHTML = '<tr><td colspan="9" class="empty-state">' +
       (hasFetched ? 'No open PRs' : 'Fetching...') + '</td></tr>';
     return;
   }
@@ -943,9 +941,8 @@ function renderMyPrs() {
       <td class="mono"><a href="${escapeHtml(pr.url)}" target="_blank">#${pr.number}</a></td>
       <td class="title-cell"><a href="${escapeHtml(pr.url)}" target="_blank">${escapeHtml(pr.title)}</a></td>
       <td>${pr.is_draft ? '<span class="pill pill-muted">Draft</span>' : reviewPill(pr)}</td>
-      <td>${detailedCIPill(pr)}</td>
+      <td>${ciOrLandingPill(pr)}</td>
       <td>${drciPill(pr)}</td>
-      <td>${landingPill(pr)}</td>
       <td>${commentCell(pr)}</td>
       <td><span class="time-text" title="${escapeHtml(pr.updated_at)}">${relativeTime(pr.updated_at)}</span></td>
     </tr>`;
