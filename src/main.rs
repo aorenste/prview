@@ -65,6 +65,14 @@ async fn main() -> std::io::Result<()> {
         worker::fetch_prs_loop(db_clone, interval, tx_clone, nudge_clone, active_users_clone).await;
     });
 
+    // Spawn background detail fetcher
+    let db_clone2 = db.clone();
+    let tx_clone2 = tx.clone();
+    let active_users_clone2 = active_users.clone();
+    tokio::spawn(async move {
+        worker::fetch_details_loop(db_clone2, tx_clone2, active_users_clone2).await;
+    });
+
     let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
     builder
         .set_private_key_file(&args.key, SslFiletype::PEM)

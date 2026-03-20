@@ -373,6 +373,316 @@ fn extract_head_sha(pr: &GqlPr) -> String {
         .unwrap_or_default()
 }
 
+// --- Per-PR detail query types ---
+
+#[derive(Deserialize)]
+struct DetailResponse {
+    data: DetailData,
+}
+
+#[derive(Deserialize)]
+struct DetailData {
+    repository: DetailRepo,
+}
+
+#[derive(Deserialize)]
+struct DetailRepo {
+    #[serde(rename = "pullRequest")]
+    pull_request: DetailPr,
+}
+
+#[derive(Deserialize)]
+struct DetailPr {
+    commits: GqlNodes<DetailCommitNode>,
+    comments: GqlNodes<DetailComment>,
+}
+
+#[derive(Deserialize)]
+struct DetailCommitNode {
+    commit: DetailCommit,
+}
+
+#[derive(Deserialize)]
+struct DetailCommit {
+    #[serde(rename = "committedDate")]
+    committed_date: Option<String>,
+    #[serde(rename = "statusCheckRollup")]
+    status_check_rollup: Option<DetailRollup>,
+}
+
+#[derive(Deserialize)]
+struct DetailRollup {
+    contexts: DetailContexts,
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct DetailContexts {
+    #[serde(rename = "totalCount")]
+    total_count: i64,
+    #[serde(rename = "pageInfo")]
+    page_info: GqlPageInfo,
+    nodes: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct DetailComment {
+    author: Option<GqlAuthor>,
+    body: String,
+    #[serde(rename = "createdAt")]
+    created_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ContextPageResponse {
+    data: ContextPageData,
+}
+
+#[derive(Deserialize)]
+struct ContextPageData {
+    repository: ContextPageRepo,
+}
+
+#[derive(Deserialize)]
+struct ContextPageRepo {
+    #[serde(rename = "pullRequest")]
+    pull_request: ContextPagePr,
+}
+
+#[derive(Deserialize)]
+struct ContextPagePr {
+    commits: GqlNodes<ContextPageCommitNode>,
+}
+
+#[derive(Deserialize)]
+struct ContextPageCommitNode {
+    commit: ContextPageCommit,
+}
+
+#[derive(Deserialize)]
+struct ContextPageCommit {
+    #[serde(rename = "statusCheckRollup")]
+    status_check_rollup: Option<ContextPageRollup>,
+}
+
+#[derive(Deserialize)]
+struct ContextPageRollup {
+    contexts: ContextPage,
+}
+
+#[derive(Deserialize)]
+struct ContextPage {
+    #[serde(rename = "pageInfo")]
+    page_info: GqlPageInfo,
+    nodes: Vec<serde_json::Value>,
+}
+
+use crate::db::PrDetailUpdate;
+
+pub async fn fetch_pr_details(repo: &str, number: i64, include_landing: bool) -> Result<PrDetailUpdate, Box<dyn std::error::Error + Send + Sync>> {
+    let parts: Vec<&str> = repo.splitn(2, '/').collect();
+    if parts.len() != 2 {
+        return Err(format!("Invalid repo format: {}", repo).into());
+    }
+    let (owner, name) = (parts[0], parts[1]);
+
+    // First query: comments + first page of check contexts
+    let query = format!(
+        r#"query {{
+  repository(owner: "{}", name: "{}") {{
+    pullRequest(number: {}) {{
+      commits(last:1) {{ nodes {{ commit {{
+        committedDate
+        statusCheckRollup {{
+          contexts(first:100) {{ totalCount pageInfo {{ hasNextPage endCursor }} nodes {{
+            ... on CheckRun {{ status conclusion }}
+            ... on StatusContext {{ state }}
+          }} }}
+        }}
+      }} }} }}
+      comments(last:100) {{ nodes {{ author {{ login }} body createdAt }} }}
+    }}
+  }}
+}}"#,
+        owner, name, number
+    );
+
+    let output = tokio::process::Command::new("gh")
+        .args(["api", "graphql", "-f", &format!("query={}", query)])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        return Err(format!("GraphQL error: {}", String::from_utf8_lossy(&output.stderr)).into());
+    }
+
+    let resp: DetailResponse = serde_json::from_slice(&output.stdout)?;
+    let pr = &resp.data.repository.pull_request;
+
+    // Collect all context nodes (paginate if needed)
+    let mut all_context_nodes = Vec::new();
+    let mut committed_date = None;
+
+    if let Some(commit_node) = pr.commits.nodes.first() {
+        committed_date = commit_node.commit.committed_date.clone();
+        if let Some(rollup) = &commit_node.commit.status_check_rollup {
+            all_context_nodes.extend(rollup.contexts.nodes.iter().cloned());
+
+            // Paginate remaining contexts
+            let mut has_next = rollup.contexts.page_info.has_next_page;
+            let mut cursor = rollup.contexts.page_info.end_cursor.clone();
+
+            while has_next {
+                let after = cursor.as_deref().unwrap_or("");
+                let page_query = format!(
+                    r#"query {{
+  repository(owner: "{}", name: "{}") {{
+    pullRequest(number: {}) {{
+      commits(last:1) {{ nodes {{ commit {{ statusCheckRollup {{
+        contexts(first:100, after: "{}") {{ pageInfo {{ hasNextPage endCursor }} nodes {{
+          ... on CheckRun {{ status conclusion }}
+          ... on StatusContext {{ state }}
+        }} }}
+      }} }} }} }}
+    }}
+  }}
+}}"#,
+                    owner, name, number, after
+                );
+
+                let page_output = tokio::process::Command::new("gh")
+                    .args(["api", "graphql", "-f", &format!("query={}", page_query)])
+                    .output()
+                    .await?;
+
+                if !page_output.status.success() {
+                    break;
+                }
+
+                let page_resp: ContextPageResponse = serde_json::from_slice(&page_output.stdout)?;
+                if let Some(cn) = page_resp.data.repository.pull_request.commits.nodes.first() {
+                    if let Some(r) = &cn.commit.status_check_rollup {
+                        all_context_nodes.extend(r.contexts.nodes.iter().cloned());
+                        has_next = r.contexts.page_info.has_next_page;
+                        cursor = r.contexts.page_info.end_cursor.clone();
+                        continue;
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    // Count CI results
+    let (mut success, mut fail, mut pending) = (0i64, 0i64, 0i64);
+    for node in &all_context_nodes {
+        if let Some(conclusion) = node.get("conclusion") {
+            // CheckRun
+            if conclusion.is_null() {
+                pending += 1; // still running
+            } else {
+                match conclusion.as_str().unwrap_or("") {
+                    "SUCCESS" | "NEUTRAL" | "SKIPPED" => success += 1,
+                    "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" => fail += 1,
+                    _ => pending += 1,
+                }
+            }
+        } else if let Some(state) = node.get("state").and_then(|s| s.as_str()) {
+            // StatusContext
+            match state {
+                "SUCCESS" => success += 1,
+                "FAILURE" | "ERROR" => fail += 1,
+                "PENDING" => pending += 1,
+                _ => pending += 1,
+            }
+        }
+    }
+
+    // Extract DrCI from comments
+    let (drci_emoji, drci_status) = extract_drci_from_detail_comments(&pr.comments.nodes);
+
+    // Extract landing status from pytorchmergebot comments
+    let landing_status = if include_landing {
+        extract_landing_status(&pr.comments.nodes, committed_date.as_deref())
+    } else {
+        String::new()
+    };
+
+    Ok(PrDetailUpdate {
+        checks_success: success,
+        checks_fail: fail,
+        checks_pending: pending,
+        checks_running: pending > 0,
+        drci_emoji,
+        drci_status,
+        landing_status,
+    })
+}
+
+fn extract_drci_from_detail_comments(comments: &[DetailComment]) -> (String, String) {
+    for comment in comments {
+        let login = comment.author.as_ref().map(|a| a.login.as_str()).unwrap_or("");
+        if login != "pytorch-bot" && login != "pytorch-bot[bot]" {
+            continue;
+        }
+        if !comment.body.contains("drci-comment-start") {
+            continue;
+        }
+        for line in comment.body.lines() {
+            if line.starts_with("## :") && !line.contains("Helpful Links") {
+                if let Some(rest) = line.strip_prefix("## :") {
+                    if let Some(colon_pos) = rest.find(':') {
+                        let emoji = rest[..colon_pos].to_string();
+                        let status = rest[colon_pos + 1..].trim().to_string();
+                        return (emoji, status);
+                    }
+                }
+            }
+        }
+        break;
+    }
+    (String::new(), String::new())
+}
+
+fn extract_landing_status(comments: &[DetailComment], committed_date: Option<&str>) -> String {
+    // Find the last pytorchmergebot comment with landing info
+    let mut last_status = String::new();
+    let mut last_created_at = String::new();
+
+    for comment in comments {
+        let login = comment.author.as_ref().map(|a| a.login.as_str()).unwrap_or("");
+        if login != "pytorchmergebot" && login != "pytorchmergebot[bot]" {
+            continue;
+        }
+
+        if comment.body.contains("### Merge started") {
+            last_status = "landing".to_string();
+            last_created_at = comment.created_at.clone().unwrap_or_default();
+        } else if comment.body.contains("successfully reverted")
+            || comment.body.contains("has been successfully reverted")
+        {
+            last_status = "reverted".to_string();
+            last_created_at = comment.created_at.clone().unwrap_or_default();
+        } else if comment.body.contains("failed to merge") || comment.body.contains("Merge failed")
+        {
+            last_status = "failed".to_string();
+            last_created_at = comment.created_at.clone().unwrap_or_default();
+        }
+    }
+
+    // Reset rule: if head commit is newer than the last landing comment, clear status
+    if !last_status.is_empty() && last_status != "landing" {
+        if let (Some(commit_date), true) = (committed_date, !last_created_at.is_empty()) {
+            // Both are ISO 8601 UTC strings from GitHub, lexicographic comparison works
+            if commit_date > last_created_at.as_str() {
+                return String::new();
+            }
+        }
+    }
+
+    last_status
+}
+
 fn extract_comment_count(pr: &GqlPr) -> i64 {
     match &pr.comments {
         Some(c) if !c.nodes.is_empty() => c.nodes.iter()

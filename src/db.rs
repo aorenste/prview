@@ -16,9 +16,13 @@ pub struct PrRow {
     pub reviewers: String,
     pub checks_overall: String,
     pub checks_running: bool,
+    pub checks_success: i64,
+    pub checks_fail: i64,
+    pub checks_pending: i64,
     pub drci_status: String,
     pub drci_emoji: String,
     pub comment_count: i64,
+    pub landing_status: String,
 }
 
 #[derive(Clone, Serialize, PartialEq)]
@@ -34,6 +38,9 @@ pub struct ReviewPrRow {
     pub reviewers: String,
     pub checks_overall: String,
     pub checks_running: bool,
+    pub checks_success: i64,
+    pub checks_fail: i64,
+    pub checks_pending: i64,
     pub drci_status: String,
     pub drci_emoji: String,
     pub comment_count: i64,
@@ -63,7 +70,7 @@ pub struct PrInsert {
     pub ci_approval_needed: bool,
 }
 
-const CURRENT_VERSION: i64 = 9;
+const CURRENT_VERSION: i64 = 10;
 
 /// Each entry migrates from version (index) to version (index + 1).
 const MIGRATIONS: &[&str] = &[
@@ -226,6 +233,16 @@ const MIGRATIONS: &[&str] = &[
     // 8 -> 9: add checks_running to both tables
     "ALTER TABLE prs ADD COLUMN checks_running INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE review_prs ADD COLUMN checks_running INTEGER NOT NULL DEFAULT 0",
+    // 9 -> 10: add detail columns for background detail fetcher
+    "ALTER TABLE prs ADD COLUMN checks_success INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE prs ADD COLUMN checks_fail INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE prs ADD COLUMN checks_pending INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE prs ADD COLUMN landing_status TEXT NOT NULL DEFAULT '';
+     ALTER TABLE prs ADD COLUMN detail_updated_at TEXT NOT NULL DEFAULT '';
+     ALTER TABLE review_prs ADD COLUMN checks_success INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE review_prs ADD COLUMN checks_fail INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE review_prs ADD COLUMN checks_pending INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE review_prs ADD COLUMN detail_updated_at TEXT NOT NULL DEFAULT ''",
 ];
 
 pub fn init_db(path: &Path) -> Connection {
@@ -293,17 +310,25 @@ fn run_migrations(conn: &Connection, from_version: i64) {
 
 pub fn replace_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS hidden_state AS
-         SELECT target_user, repo, number, hidden FROM prs WHERE hidden = 1"
+        "CREATE TEMP TABLE IF NOT EXISTS pr_preserve AS
+         SELECT target_user, repo, number, hidden, checks_success, checks_fail, checks_pending,
+                landing_status, detail_updated_at
+         FROM prs"
     )?;
     conn.execute("DELETE FROM prs WHERE target_user = ?1", rusqlite::params![user])?;
     let mut stmt = conn.prepare(
         "INSERT INTO prs (target_user, number, repo, title, url, state, created_at, updated_at, hidden,
                           is_draft, review_status, reviewers, checks_overall, checks_running,
-                          drci_status, drci_emoji, comment_count)
+                          drci_status, drci_emoji, comment_count,
+                          checks_success, checks_fail, checks_pending, landing_status, detail_updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
-                 COALESCE((SELECT hidden FROM temp.hidden_state WHERE target_user = ?1 AND repo = ?3 AND number = ?2), 0),
-                 ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                 COALESCE((SELECT hidden FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), 0),
+                 ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                 COALESCE((SELECT checks_success FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), 0),
+                 COALESCE((SELECT checks_fail FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), 0),
+                 COALESCE((SELECT checks_pending FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), 0),
+                 COALESCE((SELECT landing_status FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), ''),
+                 COALESCE((SELECT detail_updated_at FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), ''))",
     )?;
     for pr in prs {
         stmt.execute(rusqlite::params![
@@ -314,7 +339,7 @@ pub fn replace_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Result<()
             pr.drci_status, pr.drci_emoji, pr.comment_count,
         ])?;
     }
-    conn.execute_batch("DROP TABLE IF EXISTS temp.hidden_state")?;
+    conn.execute_batch("DROP TABLE IF EXISTS temp.pr_preserve")?;
     Ok(())
 }
 
@@ -322,12 +347,14 @@ pub fn list_prs(conn: &Connection, show_hidden: bool, user: &str) -> Vec<PrRow> 
     let sql = if show_hidden {
         "SELECT repo, number, title, url, updated_at, hidden, is_draft,
                 review_status, reviewers, checks_overall, checks_running,
-                drci_status, drci_emoji, comment_count
+                drci_status, drci_emoji, comment_count,
+                checks_success, checks_fail, checks_pending, landing_status
          FROM prs WHERE target_user = ?1 ORDER BY updated_at DESC"
     } else {
         "SELECT repo, number, title, url, updated_at, hidden, is_draft,
                 review_status, reviewers, checks_overall, checks_running,
-                drci_status, drci_emoji, comment_count
+                drci_status, drci_emoji, comment_count,
+                checks_success, checks_fail, checks_pending, landing_status
          FROM prs WHERE target_user = ?1 AND hidden = 0 ORDER BY updated_at DESC"
     };
     let mut stmt = conn.prepare(sql).unwrap();
@@ -347,6 +374,10 @@ pub fn list_prs(conn: &Connection, show_hidden: bool, user: &str) -> Vec<PrRow> 
             drci_status: row.get(11)?,
             drci_emoji: row.get(12)?,
             comment_count: row.get(13)?,
+            checks_success: row.get(14)?,
+            checks_fail: row.get(15)?,
+            checks_pending: row.get(16)?,
+            landing_status: row.get(17)?,
         })
     })
     .unwrap()
@@ -358,7 +389,8 @@ pub fn get_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> Option<
     conn.query_row(
         "SELECT repo, number, title, url, updated_at, hidden, is_draft,
                 review_status, reviewers, checks_overall, checks_running,
-                drci_status, drci_emoji, comment_count
+                drci_status, drci_emoji, comment_count,
+                checks_success, checks_fail, checks_pending, landing_status
          FROM prs WHERE target_user = ?1 AND repo = ?2 AND number = ?3",
         rusqlite::params![user, repo, number],
         |row| {
@@ -377,6 +409,10 @@ pub fn get_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> Option<
                 drci_status: row.get(11)?,
                 drci_emoji: row.get(12)?,
                 comment_count: row.get(13)?,
+                checks_success: row.get(14)?,
+                checks_fail: row.get(15)?,
+                checks_pending: row.get(16)?,
+                landing_status: row.get(17)?,
             })
         },
     )
@@ -401,11 +437,12 @@ pub fn set_hidden(conn: &Connection, repo: &str, number: i64, hidden: i64, user:
 }
 
 pub fn replace_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Result<(), rusqlite::Error> {
-    // Preserve read state from old data
+    // Preserve read state and detail data from old data
     conn.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS read_state AS
-         SELECT target_user, repo, number, is_read, read_comment_count, read_review_status, read_head_sha, read_title
-         FROM review_prs WHERE is_read = 1"
+        "CREATE TEMP TABLE IF NOT EXISTS review_preserve AS
+         SELECT target_user, repo, number, is_read, read_comment_count, read_review_status, read_head_sha, read_title,
+                checks_success, checks_fail, checks_pending, drci_emoji, drci_status, detail_updated_at
+         FROM review_prs"
     )?;
 
     conn.execute("DELETE FROM review_prs WHERE target_user = ?1", rusqlite::params![user])?;
@@ -428,18 +465,34 @@ pub fn replace_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Re
         ])?;
     }
 
-    // Restore read state for PRs that still exist
+    // Restore detail data for all PRs that still exist
+    conn.execute_batch(
+        "UPDATE review_prs SET
+            checks_success = rp.checks_success,
+            checks_fail = rp.checks_fail,
+            checks_pending = rp.checks_pending,
+            drci_emoji = CASE WHEN rp.drci_emoji != '' THEN rp.drci_emoji ELSE review_prs.drci_emoji END,
+            drci_status = CASE WHEN rp.drci_status != '' THEN rp.drci_status ELSE review_prs.drci_status END,
+            detail_updated_at = rp.detail_updated_at
+         FROM temp.review_preserve rp
+         WHERE review_prs.target_user = rp.target_user
+           AND review_prs.repo = rp.repo
+           AND review_prs.number = rp.number"
+    )?;
+
+    // Restore read state for read PRs
     conn.execute_batch(
         "UPDATE review_prs SET
             is_read = 1,
-            read_comment_count = rs.read_comment_count,
-            read_review_status = rs.read_review_status,
-            read_head_sha = rs.read_head_sha,
-            read_title = rs.read_title
-         FROM temp.read_state rs
-         WHERE review_prs.target_user = rs.target_user
-           AND review_prs.repo = rs.repo
-           AND review_prs.number = rs.number"
+            read_comment_count = rp.read_comment_count,
+            read_review_status = rp.read_review_status,
+            read_head_sha = rp.read_head_sha,
+            read_title = rp.read_title
+         FROM temp.review_preserve rp
+         WHERE review_prs.target_user = rp.target_user
+           AND review_prs.repo = rp.repo
+           AND review_prs.number = rp.number
+           AND rp.is_read = 1"
     )?;
 
     // Auto-unread: if tracked fields changed since last mark-read
@@ -453,7 +506,7 @@ pub fn replace_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Re
          )"
     )?;
 
-    conn.execute_batch("DROP TABLE IF EXISTS temp.read_state")?;
+    conn.execute_batch("DROP TABLE IF EXISTS temp.review_preserve")?;
     Ok(())
 }
 
@@ -462,7 +515,8 @@ pub fn list_review_prs(conn: &Connection, user: &str) -> Vec<ReviewPrRow> {
         "SELECT repo, number, title, url, author, is_draft, is_read,
                 review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count, head_sha,
-                updated_at, ci_approval_needed
+                updated_at, ci_approval_needed,
+                checks_success, checks_fail, checks_pending
          FROM review_prs WHERE target_user = ?1
          ORDER BY ci_approval_needed DESC, updated_at DESC",
     ).unwrap();
@@ -485,6 +539,9 @@ pub fn list_review_prs(conn: &Connection, user: &str) -> Vec<ReviewPrRow> {
             head_sha: row.get(14)?,
             updated_at: row.get(15)?,
             ci_approval_needed: row.get::<_, i64>(16)? != 0,
+            checks_success: row.get(17)?,
+            checks_fail: row.get(18)?,
+            checks_pending: row.get(19)?,
         })
     })
     .unwrap()
@@ -518,7 +575,8 @@ pub fn get_review_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> 
         "SELECT repo, number, title, url, author, is_draft, is_read,
                 review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count, head_sha,
-                updated_at, ci_approval_needed
+                updated_at, ci_approval_needed,
+                checks_success, checks_fail, checks_pending
          FROM review_prs WHERE target_user = ?1 AND repo = ?2 AND number = ?3",
         rusqlite::params![user, repo, number],
         |row| {
@@ -540,8 +598,77 @@ pub fn get_review_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> 
                 head_sha: row.get(14)?,
                 updated_at: row.get(15)?,
                 ci_approval_needed: row.get::<_, i64>(16)? != 0,
+                checks_success: row.get(17)?,
+                checks_fail: row.get(18)?,
+                checks_pending: row.get(19)?,
             })
         },
     )
     .ok()
+}
+
+pub fn list_stale_prs(conn: &Connection, user: &str) -> Vec<(String, i64)> {
+    let mut stmt = conn.prepare(
+        "SELECT repo, number FROM prs
+         WHERE target_user = ?1 AND detail_updated_at != updated_at AND hidden = 0"
+    ).unwrap();
+    stmt.query_map(rusqlite::params![user], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
+}
+
+pub fn list_stale_review_prs(conn: &Connection, user: &str) -> Vec<(String, i64)> {
+    let mut stmt = conn.prepare(
+        "SELECT repo, number FROM review_prs
+         WHERE target_user = ?1 AND detail_updated_at != updated_at"
+    ).unwrap();
+    stmt.query_map(rusqlite::params![user], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
+}
+
+pub struct PrDetailUpdate {
+    pub checks_success: i64,
+    pub checks_fail: i64,
+    pub checks_pending: i64,
+    pub checks_running: bool,
+    pub drci_emoji: String,
+    pub drci_status: String,
+    pub landing_status: String,
+}
+
+pub fn update_pr_details(conn: &Connection, repo: &str, number: i64, user: &str, d: &PrDetailUpdate) {
+    conn.execute(
+        "UPDATE prs SET
+            checks_success = ?1, checks_fail = ?2, checks_pending = ?3, checks_running = ?4,
+            drci_emoji = ?5, drci_status = ?6, landing_status = ?7,
+            detail_updated_at = updated_at
+         WHERE target_user = ?8 AND repo = ?9 AND number = ?10",
+        rusqlite::params![
+            d.checks_success, d.checks_fail, d.checks_pending, d.checks_running as i64,
+            d.drci_emoji, d.drci_status, d.landing_status,
+            user, repo, number,
+        ],
+    ).ok();
+}
+
+pub fn update_review_pr_details(conn: &Connection, repo: &str, number: i64, user: &str, d: &PrDetailUpdate) {
+    conn.execute(
+        "UPDATE review_prs SET
+            checks_success = ?1, checks_fail = ?2, checks_pending = ?3, checks_running = ?4,
+            drci_emoji = ?5, drci_status = ?6,
+            detail_updated_at = updated_at
+         WHERE target_user = ?7 AND repo = ?8 AND number = ?9",
+        rusqlite::params![
+            d.checks_success, d.checks_fail, d.checks_pending, d.checks_running as i64,
+            d.drci_emoji, d.drci_status,
+            user, repo, number,
+        ],
+    ).ok();
 }

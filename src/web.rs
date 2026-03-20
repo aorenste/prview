@@ -642,7 +642,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
       <thead id="my-prs-thead">
       </thead>
       <tbody id="my-prs-body">
-        <tr><td colspan="9" class="empty-state">Connecting...</td></tr>
+        <tr><td colspan="10" class="empty-state">Connecting...</td></tr>
       </tbody>
     </table>
   </div>
@@ -655,7 +655,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
       <thead id="reviews-thead">
       </thead>
       <tbody id="reviews-body">
-        <tr><td colspan="10" class="empty-state">Connecting...</td></tr>
+        <tr><td colspan="11" class="empty-state">Connecting...</td></tr>
       </tbody>
     </table>
   </div>
@@ -707,6 +707,7 @@ const myPrsCols = [
   { key: 'review_status', label: 'Review' },
   { key: 'checks_overall', label: 'CI' },
   { key: 'drci_emoji', label: 'DrCI' },
+  { key: 'landing_status', label: 'Land' },
   { key: 'comment_count', label: 'Comments' },
   { key: 'updated_at', label: 'Updated' },
 ];
@@ -718,6 +719,7 @@ const reviewsCols = [
   { key: 'author', label: 'Author' },
   { key: 'review_status', label: 'Review' },
   { key: 'checks_overall', label: 'CI' },
+  { key: 'drci_emoji', label: 'DrCI' },
   { key: 'comment_count', label: 'Comments' },
   { key: 'updated_at', label: 'Updated' },
   { key: null, label: '', style: 'width:40px' },
@@ -833,6 +835,32 @@ function checksOverallPill(pr) {
   return '<span class="pill pill-yellow" title="Checks pending"><span class="spinner"></span>Pending</span>';
 }
 
+function detailedCIPill(pr) {
+  const total = (pr.checks_success || 0) + (pr.checks_fail || 0) + (pr.checks_pending || 0);
+  if (total === 0) return checksOverallPill(pr);
+  const tip = `${pr.checks_success} passed, ${pr.checks_fail} failed, ${pr.checks_pending} pending`;
+  if (pr.checks_fail > 0) {
+    const dot = pr.checks_running
+      ? '<span class="spinner" style="border-color: var(--red); border-top-color: transparent;"></span>'
+      : '<span class="pill-dot"></span>';
+    return `<span class="pill pill-red" title="${escapeHtml(tip)}">${dot}${pr.checks_fail} failed</span>`;
+  }
+  if (pr.checks_pending > 0)
+    return `<span class="pill pill-yellow" title="${escapeHtml(tip)}"><span class="spinner"></span>${pr.checks_pending} pending</span>`;
+  return `<span class="pill pill-green" title="${escapeHtml(tip)}"><span class="pill-dot"></span>Passing</span>`;
+}
+
+function landingPill(pr) {
+  if (!pr.landing_status) return '';
+  if (pr.landing_status === 'landing')
+    return '<span class="pill pill-yellow"><span class="spinner"></span>Landing</span>';
+  if (pr.landing_status === 'reverted')
+    return '<span class="pill pill-red"><span class="pill-dot"></span>Reverted</span>';
+  if (pr.landing_status === 'failed')
+    return '<span class="pill pill-red"><span class="pill-dot"></span>Land Failed</span>';
+  return '';
+}
+
 function reviewStatusPill(pr) {
   if (pr.is_draft)
     return '<span class="pill pill-muted">Draft</span>';
@@ -891,7 +919,7 @@ function renderMyPrs() {
   }
 
   if (visible.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" class="empty-state">' +
+    tbody.innerHTML = '<tr><td colspan="10" class="empty-state">' +
       (hasFetched ? 'No open PRs' : 'Fetching...') + '</td></tr>';
     return;
   }
@@ -908,8 +936,9 @@ function renderMyPrs() {
       <td class="mono"><a href="${escapeHtml(pr.url)}" target="_blank">#${pr.number}</a></td>
       <td class="title-cell"><a href="${escapeHtml(pr.url)}" target="_blank">${escapeHtml(pr.title)}</a></td>
       <td>${pr.is_draft ? '<span class="pill pill-muted">Draft</span>' : reviewPill(pr)}</td>
-      <td>${checksOverallPill(pr)}</td>
+      <td>${detailedCIPill(pr)}</td>
       <td>${drciPill(pr)}</td>
+      <td>${landingPill(pr)}</td>
       <td>${commentCell(pr)}</td>
       <td><span class="time-text" title="${escapeHtml(pr.updated_at)}">${relativeTime(pr.updated_at)}</span></td>
     </tr>`;
@@ -991,7 +1020,7 @@ function renderReviews() {
   }
 
   if (visible.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="10" class="empty-state">' +
+    tbody.innerHTML = '<tr><td colspan="11" class="empty-state">' +
       (hasFetched ? 'No review requests' : 'Fetching...') + '</td></tr>';
     return;
   }
@@ -1010,7 +1039,8 @@ function renderReviews() {
       <td class="title-cell"><a href="${escapeHtml(pr.url)}" target="_blank" onclick="markRead('${escapeHtml(pr.repo)}', ${pr.number})">${escapeHtml(pr.title)}</a></td>
       <td><span class="author-text">${escapeHtml(pr.author)}</span></td>
       <td>${reviewPill(pr)}</td>
-      <td>${checksOverallPill(pr)} ${ciApprovalPill(pr)}</td>
+      <td>${detailedCIPill(pr)} ${ciApprovalPill(pr)}</td>
+      <td>${drciPill(pr)}</td>
       <td>${commentCell(pr)}</td>
       <td><span class="time-text" title="${escapeHtml(pr.updated_at || '')}">${relativeTime(pr.updated_at)}</span></td>
       <td class="menu-cell">

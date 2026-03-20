@@ -98,6 +98,114 @@ pub async fn fetch_prs_loop(
     }
 }
 
+pub async fn fetch_details_loop(
+    db: Arc<Mutex<Connection>>,
+    tx: broadcast::Sender<UpdateBatch>,
+    active_users: Arc<Mutex<HashMap<String, usize>>>,
+) {
+    loop {
+        let users: Vec<String> = {
+            let map = active_users.lock().unwrap();
+            if map.is_empty() {
+                vec![String::new()]
+            } else {
+                map.keys().cloned().collect()
+            }
+        };
+
+        let mut any_stale = false;
+
+        for user in &users {
+            let label = if user.is_empty() { "@me" } else { user.as_str() };
+
+            // Collect stale PRs from both tables
+            let (stale_prs, stale_reviews) = {
+                let conn = db.lock().unwrap();
+                (
+                    db::list_stale_prs(&conn, user),
+                    db::list_stale_review_prs(&conn, user),
+                )
+            };
+
+            if !stale_prs.is_empty() || !stale_reviews.is_empty() {
+                any_stale = true;
+            }
+
+            // Process my PRs
+            for (repo, number) in &stale_prs {
+                match github::fetch_pr_details(repo, *number, true).await {
+                    Ok(details) => {
+                        let pr = {
+                            let conn = db.lock().unwrap();
+                            db::update_pr_details(&conn, repo, *number, user, &details);
+                            db::get_pr(&conn, repo, *number, user)
+                        };
+                        if let Some(pr) = pr {
+                            eprintln!("[{}] Detail: {}#{} ({} pass, {} fail, {} pending{})",
+                                label, repo, number,
+                                details.checks_success, details.checks_fail, details.checks_pending,
+                                if details.landing_status.is_empty() { String::new() }
+                                else { format!(", land: {}", details.landing_status) });
+                            let hidden_count = {
+                                let conn = db.lock().unwrap();
+                                db::hidden_count(&conn, user)
+                            };
+                            let _ = tx.send(UpdateBatch {
+                                target_user: user.clone(),
+                                pr_updates: vec![PrUpdate::Changed(pr)],
+                                review_updates: vec![],
+                                hidden_count,
+                                error: None,
+                            });
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                    Err(e) => {
+                        eprintln!("[{}] Detail error: {}#{}: {}", label, repo, number, e);
+                    }
+                }
+            }
+
+            // Process review PRs
+            for (repo, number) in &stale_reviews {
+                match github::fetch_pr_details(repo, *number, false).await {
+                    Ok(details) => {
+                        let review_pr = {
+                            let conn = db.lock().unwrap();
+                            db::update_review_pr_details(&conn, repo, *number, user, &details);
+                            db::get_review_pr(&conn, repo, *number, user)
+                        };
+                        if let Some(pr) = review_pr {
+                            eprintln!("[{}] Detail: {}#{} review ({} pass, {} fail, {} pending)",
+                                label, repo, number,
+                                details.checks_success, details.checks_fail, details.checks_pending);
+                            let hidden_count = {
+                                let conn = db.lock().unwrap();
+                                db::hidden_count(&conn, user)
+                            };
+                            let _ = tx.send(UpdateBatch {
+                                target_user: user.clone(),
+                                pr_updates: vec![],
+                                review_updates: vec![ReviewPrUpdate::Changed(pr)],
+                                hidden_count,
+                                error: None,
+                            });
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                    Err(e) => {
+                        eprintln!("[{}] Detail error: {}#{} review: {}", label, repo, number, e);
+                    }
+                }
+            }
+        }
+
+        if !any_stale {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        }
+    }
+}
+
 async fn fetch_and_store(
     db: &Arc<Mutex<Connection>>,
     tx: &broadcast::Sender<UpdateBatch>,
