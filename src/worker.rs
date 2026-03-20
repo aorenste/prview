@@ -55,12 +55,13 @@ pub async fn fetch_prs_loop(
             }
         };
 
-        for (user, conns) in &users {
+        for (user, _) in &users {
             let label = if user.is_empty() { "@me" } else { user.as_str() };
             match fetch_and_store(&db, &tx, user).await {
                 Ok((my_count, review_count)) => {
+                    let conns = active_users.lock().unwrap().get(user).copied().unwrap_or(0);
                     eprintln!("[{}] Fetched {} open PRs, {} review-requested PRs ({} conn{})",
-                        label, my_count, review_count, conns, if *conns == 1 { "" } else { "s" });
+                        label, my_count, review_count, conns, if conns == 1 { "" } else { "s" });
                 }
                 Err(e) => {
                     eprintln!("[{}] Error fetching PRs: {}",

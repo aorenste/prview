@@ -59,6 +59,29 @@ pub async fn index() -> HttpResponse {
         .body(PAGE_HTML)
 }
 
+/// Drop guard that unregisters the user from active_users when the SSE stream is dropped.
+struct SseDropGuard {
+    user: String,
+    active_users: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+impl Drop for SseDropGuard {
+    fn drop(&mut self) {
+        let mut map = self.active_users.lock().unwrap();
+        let label = if self.user.is_empty() { "@me" } else { &self.user };
+        if let Some(count) = map.get_mut(&self.user) {
+            *count -= 1;
+            if *count == 0 {
+                map.remove(&self.user);
+                eprintln!("[{}] SSE disconnected (0 conns)", label);
+            } else {
+                eprintln!("[{}] SSE disconnected ({} conn{})",
+                    label, count, if *count == 1 { "" } else { "s" });
+            }
+        }
+    }
+}
+
 #[get("/api/events")]
 pub async fn events(
     db: Db,
@@ -72,10 +95,16 @@ pub async fn events(
     // Register this user so the worker fetches for them
     {
         let mut map = active_users.lock().unwrap();
-        *map.entry(user.clone()).or_insert(0) += 1;
+        let count = map.entry(user.clone()).or_insert(0);
+        *count += 1;
+        eprintln!("[{}] SSE connected ({} conn{})",
+            if user.is_empty() { "@me" } else { &user }, count, if *count == 1 { "" } else { "s" });
     }
-    let active_users_clone = active_users.clone().into_inner();
-    let user_for_drop = user.clone();
+
+    let guard = Arc::new(SseDropGuard {
+        user: user.clone(),
+        active_users: active_users.clone().into_inner().as_ref().clone(),
+    });
 
     let (init_data, mut rx) = {
         let conn = db.lock().unwrap();
@@ -88,40 +117,41 @@ pub async fn events(
 
     let stream_hash = hash.as_ref().clone();
     let stream = async_stream::stream! {
+        let _guard = guard; // prevent drop until stream ends
+
         // Send initial full state
         yield Ok::<_, actix_web::Error>(
             web::Bytes::from(format!("event: init\ndata: {}\n\n", init_data))
         );
 
-        // Stream updates as they arrive
-        loop {
-            match rx.recv().await {
-                Ok(batch) => {
-                    // Only forward updates for this user
-                    if batch.target_user != user {
-                        continue;
-                    }
-                    // Inject build_hash into the update JSON
-                    if let Ok(mut json) = serde_json::to_value(&batch) {
-                        json["build_hash"] = serde_json::Value::String(stream_hash.clone());
-                        if let Ok(s) = serde_json::to_string(&json) {
-                            yield Ok(web::Bytes::from(format!("event: update\ndata: {}\n\n", s)));
-                        }
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    eprintln!("SSE client lagged, missed {} messages", n);
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
-            }
-        }
+        // Stream updates with periodic heartbeat
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
+        heartbeat.tick().await; // consume immediate first tick
 
-        // Unregister this user when SSE disconnects
-        let mut map = active_users_clone.lock().unwrap();
-        if let Some(count) = map.get_mut(&user_for_drop) {
-            *count -= 1;
-            if *count == 0 {
-                map.remove(&user_for_drop);
+        loop {
+            tokio::select! {
+                result = rx.recv() => {
+                    match result {
+                        Ok(batch) => {
+                            if batch.target_user != user {
+                                continue;
+                            }
+                            if let Ok(mut json) = serde_json::to_value(&batch) {
+                                json["build_hash"] = serde_json::Value::String(stream_hash.clone());
+                                if let Ok(s) = serde_json::to_string(&json) {
+                                    yield Ok(web::Bytes::from(format!("event: update\ndata: {}\n\n", s)));
+                                }
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            eprintln!("SSE client lagged, missed {} messages", n);
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                _ = heartbeat.tick() => {
+                    yield Ok(web::Bytes::from(": heartbeat\n\n"));
+                }
             }
         }
     };
