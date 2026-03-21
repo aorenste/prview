@@ -436,7 +436,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
   td.mono { font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 0.85em; }
   tr:hover { background: var(--bg-hover); }
   tr.hidden-row { opacity: 0.4; }
-  tr.draft-row { opacity: 0.45; }
+  tr.draft-row { opacity: 1.0; }
   tr.read-row > td:not(.menu-cell) { opacity: 0.4; }
   tbody tr:last-child td { border-bottom: none; }
 
