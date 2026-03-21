@@ -29,6 +29,7 @@ struct InitPayload {
     prs: Vec<db::PrRow>,
     review_prs: Vec<db::ReviewPrRow>,
     merged_prs: Vec<db::MergedPrRow>,
+    issues: Vec<db::IssueRow>,
     hidden_count: i64,
 }
 
@@ -112,8 +113,9 @@ pub async fn events(
         let prs = db::list_prs(&conn, true, &user);
         let review_prs = db::list_review_prs(&conn, &user);
         let merged_prs = db::list_merged_prs(&conn, &user);
+        let issues = db::list_issues(&conn, &user);
         let hidden_count = db::hidden_count(&conn, &user);
-        let init = InitPayload { build_hash: hash.as_ref().clone(), prs, review_prs, merged_prs, hidden_count };
+        let init = InitPayload { build_hash: hash.as_ref().clone(), prs, review_prs, merged_prs, issues, hidden_count };
         (serde_json::to_string(&init).unwrap(), tx.subscribe())
     };
 
@@ -185,6 +187,7 @@ pub async fn api_toggle_hidden(db: Db, tx: Tx, body: web::Json<ToggleRequest>) -
             pr_updates: vec![crate::worker::PrUpdate::Changed(pr)],
             review_updates: vec![],
             merged_prs: vec![],
+            issue_updates: vec![],
             hidden_count,
             error: None,
         };
@@ -213,6 +216,7 @@ pub async fn api_toggle_review_read(db: Db, tx: Tx, body: web::Json<ToggleReadRe
             pr_updates: vec![],
             review_updates: vec![crate::worker::ReviewPrUpdate::Changed(pr)],
             merged_prs: vec![],
+            issue_updates: vec![],
             hidden_count,
             error: None,
         };
@@ -496,6 +500,22 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
   .pill-muted .pill-dot { background: var(--text-muted); }
   .pill-accent { background: var(--accent-bg); color: var(--accent); }
 
+  /* Label pills */
+  .label-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 0.75em;
+    font-weight: 500;
+    white-space: nowrap;
+    margin: 1px 2px;
+  }
+  .labels-cell {
+    max-width: 300px;
+    overflow: hidden;
+  }
+
   /* Comment count */
   .comment-count {
     color: var(--text-muted);
@@ -700,6 +720,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
 <div class="tabs">
   <button class="tab active" data-tab="my-prs">My Open PRs <span class="tab-count" id="my-prs-count">0</span><span class="tab-count tab-count-dim" id="my-prs-draft-count" style="display:none"></span></button>
   <button class="tab" data-tab="reviews">Needs Attention <span class="tab-count" id="reviews-count">0</span><span class="tab-count tab-count-dim" id="reviews-read-count" style="display:none"></span></button>
+  <button class="tab" data-tab="issues">My Issues <span class="tab-count" id="issues-count">0</span></button>
 </div>
 
 <div id="my-prs-panel" class="tab-panel active">
@@ -751,12 +772,25 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
   </div>
 </div>
 
+<div id="issues-panel" class="tab-panel">
+  <div class="card">
+    <table>
+      <thead id="issues-thead">
+      </thead>
+      <tbody id="issues-body">
+        <tr><td colspan="7" class="empty-state">Connecting...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
 <script>
 // --- State ---
 let buildHash = null;
 let allPrs = [];
 let allReviewPrs = [];
 let allMergedPrs = [];
+let allIssues = [];
 let hiddenCount = 0;
 let hasFetched = false;
 
@@ -769,7 +803,14 @@ function savePref(key, val) {
   try { localStorage.setItem('prview.' + key, val); } catch {}
 }
 
-let activeTab = loadPref('activeTab', false) ? 'reviews' : 'my-prs';
+let activeTab = (() => {
+  try {
+    const v = localStorage.getItem('prview.activeTab');
+    if (v === 'true') return 'reviews';  // backward compat
+    if (v === 'false' || v === null) return 'my-prs';
+    return v;
+  } catch { return 'my-prs'; }
+})();
 let showHidden = loadPref('showHidden', false);
 let showDrafts = loadPref('showDrafts', false);
 let showApproved = loadPref('showApproved', false);
@@ -789,6 +830,7 @@ function saveSortPref(key, col, dir) {
 
 let myPrsSort = loadSortPref('my', 'updated_at', 'desc');
 let reviewsSort = loadSortPref('reviews', 'updated_at', 'desc');
+let issuesSort = loadSortPref('issues', 'updated_at', 'desc');
 
 const myPrsCols = [
   { key: null, label: '', style: 'width:36px' },
@@ -813,6 +855,15 @@ const reviewsCols = [
   { key: 'comment_count', label: 'Comments' },
   { key: 'updated_at', label: 'Updated' },
   { key: null, label: '', style: 'width:40px' },
+];
+const issuesCols = [
+  { key: 'repo', label: 'Repo' },
+  { key: 'number', label: 'Issue' },
+  { key: 'title', label: 'Title' },
+  { key: 'author', label: 'Author' },
+  { key: null, label: 'Labels' },
+  { key: 'comment_count', label: 'Comments' },
+  { key: 'updated_at', label: 'Updated' },
 ];
 
 function renderHeaders(theadId, cols, sortState, onSort) {
@@ -850,7 +901,7 @@ function activateTab(id) {
   document.querySelector(`.tab[data-tab="${id}"]`).classList.add('active');
   document.getElementById(id + '-panel').classList.add('active');
   activeTab = id;
-  savePref('activeTab', id === 'reviews');
+  savePref('activeTab', id);
 }
 document.querySelectorAll('.tab').forEach(tab => {
   tab.onclick = () => activateTab(tab.dataset.tab);
@@ -1226,10 +1277,62 @@ function renderReviews() {
   }).join('');
 }
 
+// --- Issues tab ---
+function toggleIssuesSort(col) {
+  if (issuesSort.col === col) issuesSort.dir = issuesSort.dir === 'asc' ? 'desc' : 'asc';
+  else { issuesSort.col = col; issuesSort.dir = 'desc'; }
+  saveSortPref('issues', issuesSort.col, issuesSort.dir);
+  sortList(allIssues, issuesSort);
+  renderIssues();
+}
+
+function issueKey(i) { return i.repo + '#' + i.number; }
+
+function labelPills(labelsJson) {
+  let labels;
+  try { labels = JSON.parse(labelsJson); } catch { return ''; }
+  if (!labels || labels.length === 0) return '';
+  return labels.map(l => {
+    const bg = '#' + l.color;
+    // Compute luminance to pick text color
+    const r = parseInt(l.color.substr(0, 2), 16) / 255;
+    const g = parseInt(l.color.substr(2, 2), 16) / 255;
+    const b = parseInt(l.color.substr(4, 2), 16) / 255;
+    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    const fg = lum > 0.5 ? '#000' : '#fff';
+    return `<span class="label-pill" style="background:${bg};color:${fg}">${escapeHtml(l.name)}</span>`;
+  }).join('');
+}
+
+function renderIssues() {
+  renderHeaders('issues-thead', issuesCols, issuesSort, toggleIssuesSort);
+  const tbody = document.getElementById('issues-body');
+  document.getElementById('issues-count').textContent = allIssues.length;
+
+  if (allIssues.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">' +
+      (hasFetched ? 'No assigned issues' : 'Fetching...') + '</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = allIssues.map(issue => {
+    return `<tr data-key="${escapeHtml(issueKey(issue))}">
+      <td><span class="repo-text">${escapeHtml(issue.repo)}</span></td>
+      <td class="mono"><a href="${escapeHtml(issue.url)}" target="_blank">#${issue.number}</a></td>
+      <td class="title-cell"><a href="${escapeHtml(issue.url)}" target="_blank">${escapeHtml(issue.title)}</a></td>
+      <td><span class="author-text">${escapeHtml(issue.author)}</span></td>
+      <td class="labels-cell">${labelPills(issue.labels)}</td>
+      <td>${issue.comment_count > 0 ? '<span class="comment-count">' + issue.comment_count + '</span>' : ''}</td>
+      <td><span class="time-text" title="${escapeHtml(issue.updated_at)}">${relativeTime(issue.updated_at)}</span></td>
+    </tr>`;
+  }).join('');
+}
+
 function renderAll() {
   renderMyPrs();
   renderLanded();
   renderReviews();
+  renderIssues();
 }
 
 // --- Updates ---
@@ -1273,6 +1376,21 @@ function applyUpdate(batch) {
 
   if (batch.merged_prs && batch.merged_prs.length > 0) {
     allMergedPrs = batch.merged_prs;
+  }
+
+  if (batch.issue_updates) {
+    for (const u of batch.issue_updates) {
+      if (u.type === 'changed') {
+        const key = issueKey(u);
+        const idx = allIssues.findIndex(i => issueKey(i) === key);
+        if (idx >= 0) allIssues[idx] = u;
+        else allIssues.push(u);
+      } else if (u.type === 'removed') {
+        const key = u.repo + '#' + u.number;
+        allIssues = allIssues.filter(i => issueKey(i) !== key);
+      }
+    }
+    sortList(allIssues, issuesSort);
   }
 
   renderAll();
@@ -1364,6 +1482,7 @@ function setUser(user) {
   allPrs = [];
   allReviewPrs = [];
   allMergedPrs = [];
+  allIssues = [];
   hiddenCount = 0;
   hasFetched = false;
   renderAll();
@@ -1403,8 +1522,10 @@ function connectSSE() {
     allReviewPrs = data.review_prs;
     sortList(allReviewPrs, reviewsSort);
     allMergedPrs = data.merged_prs || [];
+    allIssues = data.issues || [];
+    sortList(allIssues, issuesSort);
     hiddenCount = data.hidden_count;
-    hasFetched = (allPrs.length > 0 || allReviewPrs.length > 0);
+    hasFetched = (allPrs.length > 0 || allReviewPrs.length > 0 || allIssues.length > 0);
     renderAll();
   });
 

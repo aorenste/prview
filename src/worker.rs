@@ -27,12 +27,23 @@ pub enum ReviewPrUpdate {
 }
 
 #[derive(Clone, serde::Serialize)]
+#[serde(tag = "type")]
+pub enum IssueUpdate {
+    #[serde(rename = "changed")]
+    Changed(db::IssueRow),
+    #[serde(rename = "removed")]
+    Removed { repo: String, number: i64 },
+}
+
+#[derive(Clone, serde::Serialize)]
 pub struct UpdateBatch {
     pub target_user: String,
     pub pr_updates: Vec<PrUpdate>,
     pub review_updates: Vec<ReviewPrUpdate>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub merged_prs: Vec<db::MergedPrRow>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub issue_updates: Vec<IssueUpdate>,
     pub hidden_count: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -73,6 +84,7 @@ pub async fn fetch_prs_loop(
                         pr_updates: vec![],
                         review_updates: vec![],
                         merged_prs: vec![],
+                        issue_updates: vec![],
                         hidden_count: 0,
                         error: Some(e.to_string()),
                     });
@@ -158,6 +170,7 @@ pub async fn fetch_details_loop(
                                 pr_updates: vec![PrUpdate::Changed(pr)],
                                 review_updates: vec![],
                                 merged_prs: vec![],
+                                issue_updates: vec![],
                                 hidden_count,
                                 error: None,
                             });
@@ -192,6 +205,7 @@ pub async fn fetch_details_loop(
                                 pr_updates: vec![],
                                 review_updates: vec![ReviewPrUpdate::Changed(pr)],
                                 merged_prs: vec![],
+                                issue_updates: vec![],
                                 hidden_count,
                                 error: None,
                             });
@@ -231,6 +245,13 @@ async fn fetch_and_store(
             .map(|pr| ((pr.repo.clone(), pr.number), pr))
             .collect()
     };
+    let old_issues: HashMap<(String, i64), db::IssueRow> = {
+        let conn = db.lock().unwrap();
+        db::list_issues(&conn, user)
+            .into_iter()
+            .map(|i| ((i.repo.clone(), i.number), i))
+            .collect()
+    };
 
     // Single GraphQL call gets everything
     let result = github::fetch_all_prs(user).await?;
@@ -241,6 +262,7 @@ async fn fetch_and_store(
         let conn = db.lock().unwrap();
         db::replace_prs(&conn, &result.my_prs, user)?;
         db::replace_review_prs(&conn, &result.review_prs, user)?;
+        let _ = db::replace_issues(&conn, &result.issues, user);
     }
 
     // Compute diffs
@@ -256,6 +278,13 @@ async fn fetch_and_store(
         db::list_review_prs(&conn, user)
             .into_iter()
             .map(|pr| ((pr.repo.clone(), pr.number), pr))
+            .collect()
+    };
+    let new_issues: HashMap<(String, i64), db::IssueRow> = {
+        let conn = db.lock().unwrap();
+        db::list_issues(&conn, user)
+            .into_iter()
+            .map(|i| ((i.repo.clone(), i.number), i))
             .collect()
     };
 
@@ -291,6 +320,22 @@ async fn fetch_and_store(
         }
     }
 
+    let mut issue_updates = Vec::new();
+    for (key, new_issue) in &new_issues {
+        match old_issues.get(key) {
+            Some(old_issue) if old_issue == new_issue => {}
+            _ => issue_updates.push(IssueUpdate::Changed(new_issue.clone())),
+        }
+    }
+    for (key, _) in &old_issues {
+        if !new_issues.contains_key(key) {
+            issue_updates.push(IssueUpdate::Removed {
+                repo: key.0.clone(),
+                number: key.1,
+            });
+        }
+    }
+
     // Store merged PRs and compute diff
     let old_merged: Vec<db::MergedPrRow> = {
         let conn = db.lock().unwrap();
@@ -315,6 +360,7 @@ async fn fetch_and_store(
         pr_updates,
         review_updates,
         merged_prs,
+        issue_updates,
         hidden_count,
         error: None,
     });

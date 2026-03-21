@@ -79,7 +79,32 @@ pub struct MergedPrRow {
     pub landed_at: String,
 }
 
-const CURRENT_VERSION: i64 = 11;
+#[derive(Clone, Serialize, PartialEq)]
+pub struct IssueRow {
+    pub repo: String,
+    pub number: i64,
+    pub title: String,
+    pub url: String,
+    pub author: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub comment_count: i64,
+    pub labels: String,
+}
+
+pub struct IssueInsert {
+    pub number: i64,
+    pub repo: String,
+    pub title: String,
+    pub url: String,
+    pub author: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub comment_count: i64,
+    pub labels: String,
+}
+
+const CURRENT_VERSION: i64 = 12;
 
 /// Each entry migrates from version (index) to version (index + 1).
 const MIGRATIONS: &[&str] = &[
@@ -260,6 +285,20 @@ const MIGRATIONS: &[&str] = &[
         title TEXT NOT NULL,
         url TEXT NOT NULL,
         landed_at TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (target_user, repo, number)
+     )",
+    // 11 -> 12: issues table for assigned issues
+    "CREATE TABLE issues (
+        target_user TEXT NOT NULL DEFAULT '',
+        number INTEGER NOT NULL,
+        repo TEXT NOT NULL,
+        title TEXT NOT NULL,
+        url TEXT NOT NULL,
+        author TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT '',
+        comment_count INTEGER NOT NULL DEFAULT 0,
+        labels TEXT NOT NULL DEFAULT '[]',
         PRIMARY KEY (target_user, repo, number)
      )",
 ];
@@ -719,6 +758,45 @@ pub fn list_merged_prs(conn: &Connection, user: &str) -> Vec<MergedPrRow> {
             title: row.get(2)?,
             url: row.get(3)?,
             landed_at: row.get(4)?,
+        })
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
+}
+
+pub fn replace_issues(conn: &Connection, issues: &[IssueInsert], user: &str) -> Result<(), rusqlite::Error> {
+    conn.execute("DELETE FROM issues WHERE target_user = ?1", rusqlite::params![user])?;
+    let mut stmt = conn.prepare(
+        "INSERT INTO issues (target_user, number, repo, title, url, author, created_at, updated_at, comment_count, labels)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+    )?;
+    for issue in issues {
+        stmt.execute(rusqlite::params![
+            user, issue.number, issue.repo, issue.title, issue.url,
+            issue.author, issue.created_at, issue.updated_at, issue.comment_count, issue.labels,
+        ])?;
+    }
+    Ok(())
+}
+
+pub fn list_issues(conn: &Connection, user: &str) -> Vec<IssueRow> {
+    let mut stmt = conn.prepare(
+        "SELECT repo, number, title, url, author, created_at, updated_at, comment_count, labels
+         FROM issues WHERE target_user = ?1
+         ORDER BY updated_at DESC",
+    ).unwrap();
+    stmt.query_map(rusqlite::params![user], |row| {
+        Ok(IssueRow {
+            repo: row.get(0)?,
+            number: row.get(1)?,
+            title: row.get(2)?,
+            url: row.get(3)?,
+            author: row.get(4)?,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
+            comment_count: row.get(7)?,
+            labels: row.get(8)?,
         })
     })
     .unwrap()

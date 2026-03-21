@@ -171,12 +171,151 @@ struct GqlCloser {
     typename: Option<String>,
 }
 
-use crate::db::MergedPrRow;
+// --- Issue types ---
+
+const ISSUE_FIELDS: &str = "
+  number title url
+  repository { nameWithOwner }
+  author { login }
+  createdAt updatedAt
+  comments { totalCount }
+  labels(first: 20) { nodes { name color } }
+";
+
+#[derive(Deserialize)]
+struct GqlIssueResponse {
+    data: GqlIssueData,
+}
+
+#[derive(Deserialize)]
+struct GqlIssueData {
+    search: GqlIssueSearch,
+}
+
+#[derive(Deserialize)]
+struct GqlIssueSearch {
+    #[serde(rename = "pageInfo")]
+    page_info: GqlPageInfo,
+    nodes: Vec<GqlIssue>,
+}
+
+#[derive(Deserialize)]
+struct GqlIssue {
+    number: i64,
+    title: String,
+    url: String,
+    author: Option<GqlAuthor>,
+    repository: GqlRepo,
+    #[serde(default, rename = "createdAt")]
+    created_at: String,
+    #[serde(default, rename = "updatedAt")]
+    updated_at: String,
+    #[serde(default)]
+    comments: GqlNodes<serde_json::Value>,
+    #[serde(default)]
+    labels: GqlNodes<GqlLabel>,
+}
+
+#[derive(Deserialize, Clone)]
+struct GqlLabel {
+    name: String,
+    color: String,
+}
+
+fn make_issue_query(search_filter: &str, fields: &str, cursor: Option<&str>) -> String {
+    let after = match cursor {
+        Some(c) => format!(r#", after: "{}""#, c),
+        None => String::new(),
+    };
+    format!(
+        r#"query {{
+  search(query: "{}", type: ISSUE, first: 25{}) {{
+    pageInfo {{ hasNextPage endCursor }}
+    nodes {{
+      ... on Issue {{
+        {}
+      }}
+    }}
+  }}
+}}"#,
+        search_filter, after, fields
+    )
+}
+
+async fn run_issue_query(search_filter: &str, fields: &str) -> Result<Vec<GqlIssue>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut all_nodes = Vec::new();
+    let mut cursor: Option<String> = None;
+
+    loop {
+        let query = make_issue_query(search_filter, fields, cursor.as_deref());
+
+        let mut last_err = None;
+        let mut resp = None;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                eprintln!("Retrying issue GraphQL query (attempt {})", attempt + 1);
+            }
+            let output = tokio::process::Command::new("gh")
+                .args(["api", "graphql", "-f", &format!("query={}", query)])
+                .output()
+                .await?;
+
+            if !output.status.success() {
+                last_err = Some(String::from_utf8_lossy(&output.stderr).to_string());
+                continue;
+            }
+
+            match serde_json::from_slice::<GqlIssueResponse>(&output.stdout) {
+                Ok(r) => { resp = Some(r); break; }
+                Err(e) => { last_err = Some(format!("JSON parse error: {}", e)); continue; }
+            }
+        }
+
+        let resp = match resp {
+            Some(r) => r,
+            None => return Err(format!("Issue GraphQL query failed after 3 attempts: {}", last_err.unwrap_or_default()).into()),
+        };
+
+        all_nodes.extend(resp.data.search.nodes);
+
+        if resp.data.search.page_info.has_next_page {
+            cursor = resp.data.search.page_info.end_cursor;
+        } else {
+            break;
+        }
+    }
+
+    Ok(all_nodes)
+}
+
+fn convert_issues(nodes: &[GqlIssue]) -> Vec<IssueInsert> {
+    nodes.iter().map(|issue| {
+        let labels: Vec<serde_json::Value> = issue.labels.nodes.iter().map(|l| {
+            serde_json::json!({"name": l.name, "color": l.color})
+        }).collect();
+
+        IssueInsert {
+            number: issue.number,
+            repo: issue.repository.name_with_owner.clone(),
+            title: issue.title.clone(),
+            url: issue.url.clone(),
+            author: issue.author.as_ref().map(|a| a.login.clone()).unwrap_or_default(),
+            created_at: issue.created_at.clone(),
+            updated_at: issue.updated_at.clone(),
+            comment_count: issue.comments.total_count.unwrap_or(0),
+            labels: serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_string()),
+        }
+    }).collect()
+}
+
+use crate::db::{MergedPrRow, IssueInsert};
 
 pub struct FetchResult {
     pub my_prs: Vec<PrInsert>,
     pub review_prs: Vec<PrInsert>,
     pub merged_prs: Vec<MergedPrRow>,
+    pub issues: Vec<IssueInsert>,
 }
 
 fn make_query(search_filter: &str, fields: &str, cursor: Option<&str>) -> String {
@@ -337,18 +476,33 @@ pub async fn fetch_all_prs(user: &str) -> Result<FetchResult, Box<dyn std::error
         format!("{:04}-{:02}-{:02}", y, m, d)
     };
     let landed_query = format!("is:pr author:{} closed:>{}", user_filter, seven_days_ago);
-    let merged_prs = match run_query(&landed_query, LANDED_PR_FIELDS).await {
-        Ok(nodes) => convert_landed_prs(&nodes),
-        Err(e) => {
-            eprintln!("Warning: failed to fetch landed PRs: {}", e);
-            vec![]
+    let issue_query = format!("is:issue is:open assignee:{}", user_filter);
+    let (merged_prs, issues) = tokio::join!(
+        async {
+            match run_query(&landed_query, LANDED_PR_FIELDS).await {
+                Ok(nodes) => convert_landed_prs(&nodes),
+                Err(e) => {
+                    eprintln!("Warning: failed to fetch landed PRs: {}", e);
+                    vec![]
+                }
+            }
+        },
+        async {
+            match run_issue_query(&issue_query, ISSUE_FIELDS).await {
+                Ok(nodes) => convert_issues(&nodes),
+                Err(e) => {
+                    eprintln!("Warning: failed to fetch issues: {}", e);
+                    vec![]
+                }
+            }
         }
-    };
+    );
 
     Ok(FetchResult {
         my_prs: convert_prs(&my_nodes),
         review_prs,
         merged_prs,
+        issues,
     })
 }
 
