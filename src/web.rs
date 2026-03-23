@@ -449,7 +449,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
   td.title-cell a:hover { color: var(--accent); }
 
   /* Repo text */
-  .repo-text { color: var(--text-dim); font-size: 0.85em; }
+  .repo-text { color: var(--text); font-size: 0.85em; }
 
   /* Status pills */
   .pill {
