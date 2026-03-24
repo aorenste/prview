@@ -659,6 +659,42 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
   .user-input:focus { border-color: var(--accent); }
   .user-input.active-user { border-color: var(--accent); color: var(--accent); }
 
+  /* ghstack group rows */
+  .stack-header-row td {
+    background: var(--bg-header);
+    border-bottom: 1px solid var(--border);
+    padding: 6px 16px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .stack-header-row:hover td { background: var(--bg-hover); }
+  .stack-header {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-muted);
+    font-size: 0.85em;
+    font-weight: 500;
+  }
+  .stack-arrow {
+    font-size: 10px;
+    transition: transform 0.15s;
+    display: inline-block;
+  }
+  .stack-arrow.open { transform: rotate(90deg); }
+  .stack-count {
+    background: var(--accent-bg);
+    color: var(--accent);
+    font-size: 11px;
+    padding: 1px 8px;
+    border-radius: 8px;
+    font-weight: 600;
+  }
+  .stack-child td:first-child {
+    border-left: 3px solid var(--accent);
+    padding-left: 24px;
+  }
+
   /* Recently Landed section */
   .landed-section {
     margin-top: 16px;
@@ -1029,6 +1065,117 @@ function commentCell(pr) {
 
 function prKey(pr) { return pr.repo + '#' + pr.number; }
 
+// --- ghstack grouping ---
+// ghstack uses branches: gh/<user>/<N>/head (PR branch) and gh/<user>/<N>/base (target branch).
+// Each PR targets its own <N>/base. The ghstack tool sets <N>/base == <N-1>/head, forming a chain.
+// So if PR A has head=gh/user/X/head and PR B has base=gh/user/X/base, then B is stacked on A
+// (same X means B targets A's content as its base).
+function ghstackParse(refName) {
+  const m = (refName || '').match(/^(gh\/[^/]+\/)(\d+)\/(head|base)$/);
+  return m ? { prefix: m[1], num: parseInt(m[2], 10), suffix: m[3] } : null;
+}
+
+function ghstackPosition(pr) {
+  const p = ghstackParse(pr.head_ref_name);
+  return p ? p.num : 0;
+}
+
+// Group PRs into ghstack chains.
+// Link: PR B (base=gh/user/X/base) stacks on PR A (head=gh/user/X/head) when X matches.
+// Returns [{type:'stack', id, prs, maxUpdated} | {type:'single', pr, maxUpdated}]
+function groupByStack(prs) {
+  // Index ghstack PRs by (repo, prefix, num) from their head branch
+  const byHeadNum = new Map();
+  for (const pr of prs) {
+    const p = ghstackParse(pr.head_ref_name);
+    if (p && p.suffix === 'head') {
+      byHeadNum.set(pr.repo + ':' + p.prefix + ':' + p.num, pr);
+    }
+  }
+
+  // Build adjacency: PR with head num N is stacked on PR with head num (N-1),
+  // same prefix and same repo.
+  const parentOf = new Map(); // prKey -> parent PR
+  const childOf = new Map();  // prKey -> child PR
+  for (const pr of prs) {
+    const p = ghstackParse(pr.head_ref_name);
+    if (!p || p.suffix !== 'head') continue;
+    const parentKey = pr.repo + ':' + p.prefix + ':' + (p.num - 1);
+    const parent = byHeadNum.get(parentKey);
+    if (parent) {
+      parentOf.set(prKey(pr), parent);
+      childOf.set(prKey(parent), pr);
+    }
+  }
+
+  // Walk chains from roots (PRs with no parent)
+  const inChain = new Set();
+  const chains = [];
+  for (const pr of prs) {
+    const p = ghstackParse(pr.head_ref_name);
+    if (!p || p.suffix !== 'head') continue;
+    if (parentOf.has(prKey(pr))) continue; // not a root
+    if (!childOf.has(prKey(pr))) continue; // isolated, no children
+
+    const chain = [pr];
+    let current = pr;
+    while (childOf.has(prKey(current))) {
+      current = childOf.get(prKey(current));
+      chain.push(current);
+    }
+    if (chain.length >= 2) {
+      const maxUpdated = chain.reduce((max, p) =>
+        (p.updated_at || '') > max ? p.updated_at : max, '');
+      const id = chain.map(p => p.number).join('-');
+      chains.push({type: 'stack', id, prs: chain, maxUpdated});
+      for (const p of chain) inChain.add(prKey(p));
+    }
+  }
+
+  const items = [...chains];
+  for (const pr of prs) {
+    if (!inChain.has(prKey(pr))) {
+      items.push({type: 'single', pr, maxUpdated: pr.updated_at || ''});
+    }
+  }
+
+  // Sort by maxUpdated descending
+  items.sort((a, b) => b.maxUpdated.localeCompare(a.maxUpdated));
+  return items;
+}
+
+function isStackOpen(stackId) {
+  return loadPref('ghstack-' + stackId, true);
+}
+
+function toggleStack(stackId) {
+  const open = !isStackOpen(stackId);
+  savePref('ghstack-' + stackId, open);
+  renderAll();
+}
+
+function renderStackedRows(items, rowFn, colCount) {
+  let html = '';
+  for (const item of items) {
+    if (item.type === 'single') {
+      html += rowFn(item.pr);
+    } else {
+      const open = isStackOpen(item.id);
+      const arrowCls = open ? ' open' : '';
+      const esc = escapeHtml(item.id);
+      html += `<tr class="stack-header-row" onclick="toggleStack('${esc}')">
+        <td colspan="${colCount}"><span class="stack-header">
+          <span class="stack-arrow${arrowCls}">&#9654;</span>
+          ghstack <span class="stack-count">${item.prs.length} PRs</span>
+        </span></td></tr>`;
+      if (open) {
+        html += item.prs.map(pr => rowFn(pr, true)).join('');
+      }
+    }
+  }
+  return html;
+}
+
 // --- My PRs tab ---
 function toggleMyPrsSort(col) {
   if (myPrsSort.col === col) myPrsSort.dir = myPrsSort.dir === 'asc' ? 'desc' : 'asc';
@@ -1038,10 +1185,11 @@ function toggleMyPrsSort(col) {
   renderMyPrs();
 }
 
-function prRow(pr) {
+function prRow(pr, stackChild) {
   let cls = [];
   if (pr.hidden) cls.push('hidden-row');
   if (pr.is_draft) cls.push('draft-row');
+  if (stackChild) cls.push('stack-child');
   const rowClass = cls.length ? ` class="${cls.join(' ')}"` : '';
   const checked = pr.hidden ? ' checked' : '';
   return `<tr${rowClass} data-key="${escapeHtml(prKey(pr))}">
@@ -1102,7 +1250,8 @@ function renderMyPrs() {
     tbody.innerHTML = '<tr><td colspan="9" class="empty-state">' +
       (hasFetched ? 'No open PRs' : 'Fetching...') + '</td></tr>';
   } else {
-    tbody.innerHTML = open.map(prRow).join('');
+    const items = groupByStack(open);
+    tbody.innerHTML = renderStackedRows(items, prRow, 9);
   }
 
   // Drafts section
@@ -1119,7 +1268,8 @@ function renderMyPrs() {
       draftsArrow.classList.add('open');
       draftsBody.style.display = '';
       renderHeaders('drafts-thead', myPrsCols, myPrsSort, toggleMyPrsSort);
-      document.getElementById('drafts-tbody').innerHTML = drafts.map(prRow).join('');
+      const draftItems = groupByStack(drafts);
+      document.getElementById('drafts-tbody').innerHTML = renderStackedRows(draftItems, prRow, 9);
     } else {
       draftsArrow.classList.remove('open');
       draftsBody.style.display = 'none';
@@ -1249,10 +1399,11 @@ function renderReviews() {
     return;
   }
 
-  tbody.innerHTML = visible.map(pr => {
+  function reviewRow(pr, stackChild) {
     let cls = [];
     if (pr.is_draft) cls.push('draft-row');
     if (pr.is_read) cls.push('read-row');
+    if (stackChild) cls.push('stack-child');
     const rowClass = cls.length ? ` class="${cls.join(' ')}"` : '';
     const menuLabel = pr.is_read ? 'Mark unread' : 'Mark read';
     const menuRead = pr.is_read ? 'false' : 'true';
@@ -1274,7 +1425,9 @@ function renderReviews() {
         </div>
       </td>
     </tr>`;
-  }).join('');
+  }
+  const reviewItems = groupByStack(visible);
+  tbody.innerHTML = renderStackedRows(reviewItems, reviewRow, 11);
 }
 
 // --- Issues tab ---

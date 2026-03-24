@@ -6,6 +6,7 @@ const MY_PR_FIELDS: &str = "
   number title url
   author { login }
   isDraft
+  headRefName baseRefName
   repository { nameWithOwner }
   state createdAt updatedAt reviewDecision
   reviews(first: 20) { nodes { author { login } state } }
@@ -21,6 +22,7 @@ const REVIEW_PR_FIELDS: &str = "
   number title url
   author { login }
   isDraft
+  headRefName baseRefName
   repository { nameWithOwner }
   state createdAt updatedAt reviewDecision
   reviews(first: 20) { nodes { author { login } state } }
@@ -76,6 +78,10 @@ struct GqlPr {
     author: Option<GqlAuthor>,
     #[serde(default, rename = "isDraft")]
     is_draft: bool,
+    #[serde(default, rename = "headRefName")]
+    head_ref_name: String,
+    #[serde(default, rename = "baseRefName")]
+    base_ref_name: String,
     repository: GqlRepo,
     #[serde(default)]
     state: String,
@@ -401,6 +407,8 @@ fn convert_prs(nodes: &[GqlPr]) -> Vec<PrInsert> {
             updated_at: pr.updated_at.clone(),
             author: pr.author.as_ref().map(|a| a.login.clone()).unwrap_or_default(),
             is_draft: pr.is_draft,
+            head_ref_name: pr.head_ref_name.clone(),
+            base_ref_name: pr.base_ref_name.clone(),
             review_status,
             reviewers,
             checks_overall: extract_checks_overall(pr),
