@@ -247,6 +247,8 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PRView</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect width='128' height='128' rx='24' fill='%230f172a'/><circle cx='40' cy='36' r='10' fill='none' stroke='%23818cf8' stroke-width='7'/><line x1='40' y1='46' x2='40' y2='92' stroke='%23818cf8' stroke-width='7' stroke-linecap='round'/><circle cx='88' cy='92' r='10' fill='none' stroke='%23818cf8' stroke-width='7'/><line x1='88' y1='82' x2='88' y2='56' stroke='%23818cf8' stroke-width='7' stroke-linecap='round'/><path d='M88 56 L76 48 M88 56 L76 64' fill='none' stroke='%23818cf8' stroke-width='7' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+<link rel="manifest" href="data:application/json,{%22name%22:%22PRView%22,%22short_name%22:%22PRView%22,%22display%22:%22standalone%22,%22background_color%22:%22%230f172a%22,%22theme_color%22:%22%230f172a%22}">
 <style>
   :root {
     --bg-body: #0f172a;
