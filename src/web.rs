@@ -543,6 +543,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
     color: var(--text);
     font-size: 0.9em;
   }
+  td.author-cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* Checkbox */
   input[type="checkbox"] {
@@ -757,7 +758,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
     --col-status: 90px;
     --col-author: 100px;
     --col-comments: 80px;
-    --col-updated: 80px;
+    --col-updated: 60px;
     --col-menu: 40px;
   }
   th.col-checkbox { width: var(--col-checkbox); }
@@ -770,6 +771,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
   th[data-sort="comment_count"] { width: var(--col-comments); }
   th[data-sort="updated_at"] { width: var(--col-updated); }
   th.col-menu { width: var(--col-menu); }
+  th.col-menu, td.menu-cell { padding-left: 6px; padding-right: 6px; }
 
   /* Responsive — medium */
   @media (max-width: 1000px) {
@@ -781,6 +783,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
       --col-comments: 50px;
       --col-updated: 65px;
     }
+    #reviews-panel th[data-sort="updated_at"] { width: 30px; }
     .pill { font-size: 0; gap: 0; padding: 6px; }
     .pill .pill-dot, .pill .spinner { font-size: initial; }
     th[data-sort="review_status"], th[data-sort="checks_overall"], th[data-sort="drci_emoji"] { font-size: 0; }
@@ -797,9 +800,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
       --col-comments: 40px;
       --col-updated: 55px;
     }
-    td, th { padding: 8px 6px; }
-    .header { flex-wrap: wrap; }
-  }
+    #reviews-panel th[data-sort="updated_at"] { width: 30px; }
 </style>
 </head>
 <body>
@@ -1038,8 +1039,8 @@ function relativeTime(iso) {
   const then = new Date(iso).getTime();
   const diff = Math.max(0, now - then);
   const mins = Math.floor(diff / 60000);
-  const ago = isNarrow ? '' : ' ago';
-  if (mins < 1) return isNarrow ? 'now' : 'just now';
+  const ago = (isNarrow || isMedium) ? '' : ' ago';
+  if (mins < 1) return (isNarrow || isMedium) ? 'now' : 'just now';
   if (mins < 60) return mins + 'm' + ago;
   const hrs = Math.floor(mins / 60);
   if (hrs < 24) return hrs + 'h' + ago;
@@ -1494,7 +1495,7 @@ function renderReviews() {
       <td class="repo-cell"><span class="repo-text">${escapeHtml(pr.repo)}</span></td>
       <td class="mono"><a href="${escapeHtml(pr.url)}" target="_blank" onclick="markRead('${escapeHtml(pr.repo)}', ${pr.number})">#${pr.number}</a></td>
       <td class="title-cell"><a href="${escapeHtml(pr.url)}" target="_blank" onclick="markRead('${escapeHtml(pr.repo)}', ${pr.number})">${escapeHtml(pr.title)}</a></td>
-      <td><span class="author-text">${escapeHtml(pr.author)}</span></td>
+      <td class="author-cell"><span class="author-text">${escapeHtml(pr.author)}</span></td>
       <td>${reviewPill(pr)}</td>
       <td>${detailedCIPill(pr)} ${ciApprovalPill(pr)}</td>
       <td>${drciPill(pr)}</td>
@@ -1555,7 +1556,7 @@ function renderIssues() {
       <td class="repo-cell"><span class="repo-text">${escapeHtml(issue.repo)}</span></td>
       <td class="mono"><a href="${escapeHtml(issue.url)}" target="_blank">#${issue.number}</a></td>
       <td class="title-cell"><a href="${escapeHtml(issue.url)}" target="_blank">${escapeHtml(issue.title)}</a></td>
-      <td><span class="author-text">${escapeHtml(issue.author)}</span></td>
+      <td class="author-cell"><span class="author-text">${escapeHtml(issue.author)}</span></td>
       <td class="labels-cell">${labelPills(issue.labels)}</td>
       <td>${issue.comment_count > 0 ? '<span class="comment-count">' + issue.comment_count + '</span>' : ''}</td>
       <td><span class="time-text" title="${escapeHtml(issue.updated_at)}">${relativeTime(issue.updated_at)}</span></td>
