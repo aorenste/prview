@@ -481,8 +481,9 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
     color: var(--text);
     padding: 4px 10px;
     border-radius: 6px;
-    font-size: 0.85em;
-    white-space: nowrap;
+    font-size: 13px;
+    white-space: pre-line;
+    width: max-content;
     pointer-events: none;
     z-index: 50;
     border: 1px solid var(--border);
@@ -871,7 +872,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
       <thead id="reviews-thead">
       </thead>
       <tbody id="reviews-body">
-        <tr><td colspan="11" class="empty-state">Connecting...</td></tr>
+        <tr><td colspan="10" class="empty-state">Connecting...</td></tr>
       </tbody>
     </table>
     </div>
@@ -961,7 +962,6 @@ const myPrsCols = [
   { key: 'updated_at', label: 'Updated', narrowLabel: 'U' },
 ];
 const reviewsCols = [
-  { key: null, label: '', cls: 'col-checkbox' },
   { key: 'repo', label: 'Repo' },
   { key: 'number', label: 'PR' },
   { key: 'title', label: 'Title' },
@@ -1068,8 +1068,8 @@ function reviewPill(pr) {
 function drciPill(pr) {
   if (!pr.drci_emoji) {
     if (pr.checks_pending > 0)
-      return '<span class="pill pill-yellow"><span class="spinner"></span>Pending</span>';
-    return '<span class="pill pill-muted"><span class="pill-dot"></span>None</span>';
+      return '<span class="pill pill-yellow" data-tip="DrCI pending"><span class="spinner"></span>Pending</span>';
+    return '<span class="pill pill-muted" data-tip="No DrCI status"><span class="pill-dot"></span>None</span>';
   }
   const tip = escapeHtml(pr.drci_status);
   const m = {
@@ -1085,10 +1085,6 @@ function drciPill(pr) {
   return `<span class="pill ${cls}" data-tip="${tip}">${dot}${label}</span>`;
 }
 
-function ciApprovalPill(pr) {
-  if (!pr.ci_approval_needed) return '';
-  return '<span class="pill pill-red"><span class="spinner" style="border-color: var(--red); border-top-color: transparent;"></span>CI Approval</span>';
-}
 
 function checksOverallPill(pr) {
   if (!pr.checks_overall) return '<span class="pill pill-muted"><span class="pill-dot"></span>None</span>';
@@ -1131,14 +1127,26 @@ function ciOrLandingPill(pr) {
   return detailedCIPill(pr);
 }
 
-function reviewStatusPill(pr) {
+function reviewCombinedPill(pr) {
+  let reviewers;
+  try { reviewers = JSON.parse(pr.reviewers); } catch { reviewers = []; }
+  const revTip = reviewers.length === 0
+    ? 'No reviews yet'
+    : reviewers.map(r => r.login + ': ' + r.state).join('\n');
+  if (pr.ci_approval_needed) {
+    const tip = 'CI requires approval\n' + revTip;
+    return `<span class="pill pill-red" data-tip="${escapeHtml(tip)}"><span class="spinner" style="border-color: var(--red); border-top-color: transparent;"></span>CI Approval</span>`;
+  }
   if (pr.is_draft)
-    return '<span class="pill pill-muted">Draft</span>';
-  if (pr.review_status === 'APPROVED')
-    return '<span class="pill pill-green"><span class="pill-dot"></span>Approved</span>';
+    return `<span class="pill pill-muted" data-tip="${escapeHtml('Draft PR\n' + revTip)}">Draft</span>`;
+  const tip = revTip;
   if (pr.review_status === 'CHANGES_REQUESTED')
-    return '<span class="pill pill-red"><span class="pill-dot"></span>Changes</span>';
-  return '<span class="pill pill-yellow"><span class="pill-dot"></span>Awaiting</span>';
+    return `<span class="pill pill-red" data-tip="${escapeHtml(tip)}"><span class="pill-dot"></span>Changes</span>`;
+  if (pr.review_status === 'APPROVED')
+    return `<span class="pill pill-green" data-tip="${escapeHtml(tip)}"><span class="pill-dot"></span>Approved</span>`;
+  if (reviewers.length > 0)
+    return `<span class="pill pill-yellow" data-tip="${escapeHtml(tip)}"><span class="pill-dot"></span>Pending</span>`;
+  return `<span class="pill pill-muted" data-tip="${escapeHtml(tip)}"><span class="pill-dot"></span>None</span>`;
 }
 
 function commentCell(pr) {
@@ -1477,7 +1485,7 @@ function renderReviews() {
   }
 
   if (visible.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="11" class="empty-state">' +
+    tbody.innerHTML = '<tr><td colspan="10" class="empty-state">' +
       (hasFetched ? 'No review requests' : 'Fetching...') + '</td></tr>';
     return;
   }
@@ -1491,13 +1499,12 @@ function renderReviews() {
     const menuLabel = pr.is_read ? 'Mark unread' : 'Mark read';
     const menuRead = pr.is_read ? 'false' : 'true';
     return `<tr${rowClass} data-key="${escapeHtml(prKey(pr))}">
-      <td>${reviewStatusPill(pr)}</td>
       <td class="repo-cell"><span class="repo-text">${escapeHtml(pr.repo)}</span></td>
       <td class="mono"><a href="${escapeHtml(pr.url)}" target="_blank" onclick="markRead('${escapeHtml(pr.repo)}', ${pr.number})">#${pr.number}</a></td>
       <td class="title-cell"><a href="${escapeHtml(pr.url)}" target="_blank" onclick="markRead('${escapeHtml(pr.repo)}', ${pr.number})">${escapeHtml(pr.title)}</a></td>
       <td class="author-cell"><span class="author-text">${escapeHtml(pr.author)}</span></td>
-      <td>${reviewPill(pr)}</td>
-      <td>${detailedCIPill(pr)} ${ciApprovalPill(pr)}</td>
+      <td>${reviewCombinedPill(pr)}</td>
+      <td>${detailedCIPill(pr)}</td>
       <td>${drciPill(pr)}</td>
       <td>${commentCell(pr)}</td>
       <td><span class="time-text" title="${escapeHtml(pr.updated_at || '')}">${relativeTime(pr.updated_at)}</span></td>
@@ -1510,7 +1517,7 @@ function renderReviews() {
     </tr>`;
   }
   const reviewItems = groupByStack(visible);
-  tbody.innerHTML = renderStackedRows(reviewItems, reviewRow, 11);
+  tbody.innerHTML = renderStackedRows(reviewItems, reviewRow, 10);
 }
 
 // --- Issues tab ---
