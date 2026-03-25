@@ -245,6 +245,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PRView</title>
 <style>
   :root {
@@ -268,13 +269,14 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
     --pill-muted-bg: rgba(100, 116, 139, 0.15);
   }
 
-  * { box-sizing: border-box; margin: 0; padding: 0; }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-text-size-adjust: none; text-size-adjust: none; }
 
   body {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 14px;
     background: var(--bg-body);
     color: var(--text);
-    padding: 24px 32px;
+    padding: 16px 20px;
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
   }
@@ -333,9 +335,10 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
     padding: 3px;
     margin-bottom: 20px;
     gap: 2px;
+    overflow-x: auto;
   }
   .tab {
-    padding: 8px 18px;
+    padding: 8px 12px;
     cursor: pointer;
     border: none;
     background: none;
@@ -415,10 +418,10 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
   }
 
   /* Table */
-  table { border-collapse: collapse; width: 100%; }
+  table { border-collapse: collapse; width: 100%; table-layout: fixed; }
   th {
     text-align: left;
-    padding: 10px 14px;
+    padding: 8px 12px;
     font-size: 0.75em;
     font-weight: 600;
     text-transform: uppercase;
@@ -428,12 +431,12 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
     border-bottom: 1px solid var(--border);
   }
   td {
-    padding: 10px 14px;
+    padding: 8px 12px;
     border-bottom: 1px solid rgba(51, 65, 85, 0.5);
     vertical-align: middle;
   }
   td.icon { text-align: center; font-size: 1em; }
-  td.mono { font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 0.85em; }
+  td.mono { font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 0.85em; overflow: hidden; }
   tr:hover { background: var(--bg-hover); }
   tr.hidden-row { opacity: 0.4; }
   tr.draft-row { opacity: 1.0; }
@@ -445,11 +448,13 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
   a:hover { color: #a5b4fc; }
 
   /* PR title link styling */
+  td.title-cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   td.title-cell a { color: var(--text-bright); font-weight: 500; }
   td.title-cell a:hover { color: var(--accent); }
 
   /* Repo text */
   .repo-text { color: var(--text); font-size: 0.85em; }
+  td.repo-cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; }
 
   /* Status pills */
   .pill {
@@ -463,6 +468,8 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
     white-space: nowrap;
     cursor: default;
     position: relative;
+    height: 20px;
+    box-sizing: border-box;
   }
   .pill[data-tip]:hover::after {
     content: attr(data-tip);
@@ -522,6 +529,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
     font-size: 0.85em;
     font-variant-numeric: tabular-nums;
   }
+  th[data-sort="comment_count"], td:has(.comment-count) { text-align: center; }
 
   /* Updated time */
   .time-text {
@@ -736,7 +744,62 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
   }
   .landed-table a { color: var(--text-muted); text-decoration: none; }
   .landed-table a:hover { color: var(--text); text-decoration: underline; }
-  .landed-table .title-cell { max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .landed-table .title-cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* Table horizontal scroll wrapper */
+  .table-scroll { overflow-x: auto; }
+
+  /* Column widths */
+  :root {
+    --col-checkbox: 36px;
+    --col-repo: 120px;
+    --col-pr: 65px;
+    --col-status: 90px;
+    --col-author: 100px;
+    --col-comments: 80px;
+    --col-updated: 80px;
+    --col-menu: 40px;
+  }
+  th.col-checkbox { width: var(--col-checkbox); }
+  th[data-sort="repo"], td.repo-cell { padding-right: 4px; padding-left: 4px; }
+  th[data-sort="number"], td.mono { padding-right: 4px; padding-left: 4px; }
+  th[data-sort="repo"] { width: var(--col-repo); }
+  th[data-sort="number"] { width: var(--col-pr); }
+  th[data-sort="review_status"], th[data-sort="checks_overall"], th[data-sort="drci_emoji"] { width: var(--col-status); }
+  th[data-sort="author"] { width: var(--col-author); }
+  th[data-sort="comment_count"] { width: var(--col-comments); }
+  th[data-sort="updated_at"] { width: var(--col-updated); }
+  th.col-menu { width: var(--col-menu); }
+
+  /* Responsive — medium */
+  @media (max-width: 1000px) {
+    :root {
+      --col-repo: 90px;
+      --col-pr: 60px;
+      --col-status: 30px;
+      --col-author: 80px;
+      --col-comments: 50px;
+      --col-updated: 65px;
+    }
+    .pill { font-size: 0; gap: 0; padding: 6px; }
+    .pill .pill-dot, .pill .spinner { font-size: initial; }
+    th[data-sort="review_status"], th[data-sort="checks_overall"], th[data-sort="drci_emoji"] { font-size: 0; }
+    th[data-sort="review_status"] .sort-arrow, th[data-sort="checks_overall"] .sort-arrow, th[data-sort="drci_emoji"] .sort-arrow { font-size: 10px; }
+  }
+
+  /* Responsive — narrow */
+  @media (max-width: 750px) {
+    :root {
+      --col-repo: 60px;
+      --col-pr: 65px;
+      --col-status: 26px;
+      --col-author: 60px;
+      --col-comments: 40px;
+      --col-updated: 55px;
+    }
+    td, th { padding: 8px 6px; }
+    .header { flex-wrap: wrap; }
+  }
 </style>
 </head>
 <body>
@@ -762,6 +825,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
 <div id="my-prs-panel" class="tab-panel active">
   <div class="card">
     <div class="filter-bar" id="my-prs-filter-bar"></div>
+    <div class="table-scroll">
     <table>
       <thead id="my-prs-thead">
       </thead>
@@ -769,6 +833,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
         <tr><td colspan="9" class="empty-state">Connecting...</td></tr>
       </tbody>
     </table>
+    </div>
   </div>
   <div id="drafts-section" class="landed-section" style="display:none">
     <button class="landed-toggle" id="drafts-toggle" onclick="toggleDrafts()">
@@ -776,10 +841,12 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
     </button>
     <div id="drafts-body" style="display:none">
       <div class="card">
+        <div class="table-scroll">
         <table>
           <thead id="drafts-thead"></thead>
           <tbody id="drafts-tbody"></tbody>
         </table>
+        </div>
       </div>
     </div>
   </div>
@@ -798,6 +865,7 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
 <div id="reviews-panel" class="tab-panel">
   <div class="card">
     <div class="filter-bar" id="reviews-filter-bar"></div>
+    <div class="table-scroll">
     <table>
       <thead id="reviews-thead">
       </thead>
@@ -805,11 +873,13 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
         <tr><td colspan="11" class="empty-state">Connecting...</td></tr>
       </tbody>
     </table>
+    </div>
   </div>
 </div>
 
 <div id="issues-panel" class="tab-panel">
   <div class="card">
+    <div class="table-scroll">
     <table>
       <thead id="issues-thead">
       </thead>
@@ -817,10 +887,19 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
         <tr><td colspan="7" class="empty-state">Connecting...</td></tr>
       </tbody>
     </table>
+    </div>
   </div>
 </div>
 
 <script>
+// --- Responsive ---
+const narrowMq = window.matchMedia('(max-width: 750px)');
+const mediumMq = window.matchMedia('(max-width: 1000px)');
+let isNarrow = narrowMq.matches;
+let isMedium = mediumMq.matches;
+narrowMq.addEventListener('change', e => { isNarrow = e.matches; renderAll(); });
+mediumMq.addEventListener('change', e => { isMedium = e.matches; renderAll(); });
+
 // --- State ---
 let buildHash = null;
 let allPrs = [];
@@ -829,6 +908,7 @@ let allMergedPrs = [];
 let allIssues = [];
 let hiddenCount = 0;
 let hasFetched = false;
+
 
 // Persist toggle state in localStorage
 function loadPref(key, fallback) {
@@ -869,18 +949,18 @@ let reviewsSort = loadSortPref('reviews', 'updated_at', 'desc');
 let issuesSort = loadSortPref('issues', 'updated_at', 'desc');
 
 const myPrsCols = [
-  { key: null, label: '', style: 'width:36px' },
+  { key: null, label: '', cls: 'col-checkbox' },
   { key: 'repo', label: 'Repo' },
   { key: 'number', label: 'PR' },
   { key: 'title', label: 'Title' },
   { key: 'review_status', label: 'Review' },
   { key: 'checks_overall', label: 'CI' },
   { key: 'drci_emoji', label: 'DrCI' },
-  { key: 'comment_count', label: 'Comments' },
-  { key: 'updated_at', label: 'Updated' },
+  { key: 'comment_count', label: 'Comments', narrowLabel: 'C' },
+  { key: 'updated_at', label: 'Updated', narrowLabel: 'U' },
 ];
 const reviewsCols = [
-  { key: null, label: '', style: 'width:36px' },
+  { key: null, label: '', cls: 'col-checkbox' },
   { key: 'repo', label: 'Repo' },
   { key: 'number', label: 'PR' },
   { key: 'title', label: 'Title' },
@@ -888,9 +968,9 @@ const reviewsCols = [
   { key: 'review_status', label: 'Review' },
   { key: 'checks_overall', label: 'CI' },
   { key: 'drci_emoji', label: 'DrCI' },
-  { key: 'comment_count', label: 'Comments' },
-  { key: 'updated_at', label: 'Updated' },
-  { key: null, label: '', style: 'width:40px' },
+  { key: 'comment_count', label: 'Comments', narrowLabel: 'C' },
+  { key: 'updated_at', label: 'Updated', narrowLabel: 'U' },
+  { key: null, label: '', cls: 'col-menu' },
 ];
 const issuesCols = [
   { key: 'repo', label: 'Repo' },
@@ -898,18 +978,19 @@ const issuesCols = [
   { key: 'title', label: 'Title' },
   { key: 'author', label: 'Author' },
   { key: null, label: 'Labels' },
-  { key: 'comment_count', label: 'Comments' },
-  { key: 'updated_at', label: 'Updated' },
+  { key: 'comment_count', label: 'Comments', narrowLabel: 'C' },
+  { key: 'updated_at', label: 'Updated', narrowLabel: 'U' },
 ];
 
 function renderHeaders(theadId, cols, sortState, onSort) {
   const thead = document.getElementById(theadId);
   thead.innerHTML = '<tr>' + cols.map(c => {
-    if (!c.key) return `<th${c.style ? ' style="' + c.style + '"' : ''}></th>`;
+    if (!c.key) return `<th${c.cls ? ' class="' + c.cls + '"' : ''}></th>`;
     const active = sortState.col === c.key;
     const arrow = active ? (sortState.dir === 'asc' ? '\u25b2' : '\u25bc') : '\u25b4';
     const cls = 'sortable' + (active ? ' sort-active' : '');
-    return `<th class="${cls}" data-sort="${c.key}"${c.style ? ' style="' + c.style + '"' : ''}>${c.label}<span class="sort-arrow">${arrow}</span></th>`;
+    const display = (isMedium && c.narrowLabel) ? c.narrowLabel : c.label;
+    return `<th class="${cls}" data-sort="${c.key}" title="${c.label}">${display}<span class="sort-arrow">${arrow}</span></th>`;
   }).join('') + '</tr>';
   thead.querySelectorAll('th.sortable').forEach(th => {
     th.onclick = () => onSort(th.dataset.sort);
@@ -957,14 +1038,15 @@ function relativeTime(iso) {
   const then = new Date(iso).getTime();
   const diff = Math.max(0, now - then);
   const mins = Math.floor(diff / 60000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return mins + 'm ago';
+  const ago = isNarrow ? '' : ' ago';
+  if (mins < 1) return isNarrow ? 'now' : 'just now';
+  if (mins < 60) return mins + 'm' + ago;
   const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return hrs + 'h ago';
+  if (hrs < 24) return hrs + 'h' + ago;
   const days = Math.floor(hrs / 24);
-  if (days < 30) return days + 'd ago';
+  if (days < 30) return days + 'd' + ago;
   const months = Math.floor(days / 30);
-  return months + 'mo ago';
+  return months + 'mo' + ago;
 }
 
 function reviewPill(pr) {
@@ -1194,7 +1276,7 @@ function prRow(pr, stackChild) {
   const checked = pr.hidden ? ' checked' : '';
   return `<tr${rowClass} data-key="${escapeHtml(prKey(pr))}">
     <td><input type="checkbox"${checked} onchange="toggleHidden('${escapeHtml(pr.repo)}', ${pr.number}, this.checked)" title="Hide this PR"></td>
-    <td><span class="repo-text">${escapeHtml(pr.repo)}</span></td>
+    <td class="repo-cell"><span class="repo-text">${escapeHtml(pr.repo)}</span></td>
     <td class="mono"><a href="${escapeHtml(pr.url)}" target="_blank">#${pr.number}</a></td>
     <td class="title-cell"><a href="${escapeHtml(pr.url)}" target="_blank">${escapeHtml(pr.title)}</a></td>
     <td>${pr.is_draft ? '<span class="pill pill-muted">Draft</span>' : reviewPill(pr)}</td>
@@ -1307,7 +1389,7 @@ function renderLanded() {
       const repo = escapeHtml(pr.repo);
       const shortRepo = repo.split('/').pop();
       return `<tr>
-        <td><span class="repo-text">${shortRepo}</span></td>
+        <td class="repo-cell"><span class="repo-text">${shortRepo}</span></td>
         <td class="mono"><a href="${escapeHtml(pr.url)}" target="_blank">#${pr.number}</a></td>
         <td class="title-cell"><a href="${escapeHtml(pr.url)}" target="_blank">${escapeHtml(pr.title)}</a></td>
         <td><span class="time-text" title="${escapeHtml(pr.landed_at)}">${relativeTime(pr.landed_at)}</span></td>
@@ -1409,7 +1491,7 @@ function renderReviews() {
     const menuRead = pr.is_read ? 'false' : 'true';
     return `<tr${rowClass} data-key="${escapeHtml(prKey(pr))}">
       <td>${reviewStatusPill(pr)}</td>
-      <td><span class="repo-text">${escapeHtml(pr.repo)}</span></td>
+      <td class="repo-cell"><span class="repo-text">${escapeHtml(pr.repo)}</span></td>
       <td class="mono"><a href="${escapeHtml(pr.url)}" target="_blank" onclick="markRead('${escapeHtml(pr.repo)}', ${pr.number})">#${pr.number}</a></td>
       <td class="title-cell"><a href="${escapeHtml(pr.url)}" target="_blank" onclick="markRead('${escapeHtml(pr.repo)}', ${pr.number})">${escapeHtml(pr.title)}</a></td>
       <td><span class="author-text">${escapeHtml(pr.author)}</span></td>
@@ -1470,7 +1552,7 @@ function renderIssues() {
 
   tbody.innerHTML = allIssues.map(issue => {
     return `<tr data-key="${escapeHtml(issueKey(issue))}">
-      <td><span class="repo-text">${escapeHtml(issue.repo)}</span></td>
+      <td class="repo-cell"><span class="repo-text">${escapeHtml(issue.repo)}</span></td>
       <td class="mono"><a href="${escapeHtml(issue.url)}" target="_blank">#${issue.number}</a></td>
       <td class="title-cell"><a href="${escapeHtml(issue.url)}" target="_blank">${escapeHtml(issue.title)}</a></td>
       <td><span class="author-text">${escapeHtml(issue.author)}</span></td>
