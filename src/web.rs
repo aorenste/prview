@@ -1225,15 +1225,26 @@ function groupByStack(prs) {
     }
   }
 
-  const items = [...chains];
+  // Build items preserving the input sort order.
+  // Each stack group appears at the position of its first member in `prs`.
+  const chainByPr = new Map(); // prKey -> chain item
+  for (const chain of chains) {
+    for (const p of chain.prs) chainByPr.set(prKey(p), chain);
+  }
+  const items = [];
+  const emitted = new Set();
   for (const pr of prs) {
-    if (!inChain.has(prKey(pr))) {
+    const k = prKey(pr);
+    if (inChain.has(k)) {
+      const chain = chainByPr.get(k);
+      if (!emitted.has(chain.id)) {
+        emitted.add(chain.id);
+        items.push(chain);
+      }
+    } else {
       items.push({type: 'single', pr, maxUpdated: pr.updated_at || ''});
     }
   }
-
-  // Sort by maxUpdated descending
-  items.sort((a, b) => b.maxUpdated.localeCompare(a.maxUpdated));
   return items;
 }
 
