@@ -31,8 +31,8 @@ struct Args {
     key: Option<PathBuf>,
 
     /// Path to SQLite database file
-    #[arg(long, default_value = "~/.prview.db")]
-    db: PathBuf,
+    #[arg(long)]
+    db: Option<PathBuf>,
 
     /// How often to fetch PRs from GitHub (e.g. "5m", "30s", "1h")
     #[arg(long, default_value = "1m", value_parser = humantime::parse_duration)]
@@ -55,13 +55,19 @@ async fn main() -> std::io::Result<()> {
         .key
         .unwrap_or_else(|| PathBuf::from(format!("/etc/ssl/certs/{}.key", fqdn)));
 
-    // Expand ~ in db path
-    let db_path = if args.db.starts_with("~") {
-        let home = std::env::var("HOME").expect("HOME not set");
-        PathBuf::from(home).join(args.db.strip_prefix("~").unwrap())
-    } else {
-        args.db.clone()
-    };
+    // Resolve DB path: --db flag, or $XDG_DATA_HOME/prview/prview.db
+    let db_path = args.db.unwrap_or_else(|| {
+        let data_dir = std::env::var("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                let home = std::env::var("HOME").expect("HOME not set");
+                PathBuf::from(home).join(".local/share")
+            });
+        data_dir.join("prview/prview.db")
+    });
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
 
     let conn = db::init_db(&db_path);
     let db = Arc::new(Mutex::new(conn));

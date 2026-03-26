@@ -1,6 +1,102 @@
+use std::sync::OnceLock;
+
+use reqwest::Client;
 use serde::Deserialize;
 
 use crate::db::PrInsert;
+
+type BoxErr = Box<dyn std::error::Error + Send + Sync>;
+
+static CLIENT: OnceLock<(Client, String)> = OnceLock::new();
+
+fn get_client() -> &'static (Client, String) {
+    CLIENT.get_or_init(|| {
+        let token = resolve_token().expect("Could not find GitHub token. Set GITHUB_TOKEN env var or authenticate with `gh auth login`.");
+        let client = Client::builder()
+            .user_agent("prview")
+            .build()
+            .expect("Failed to build HTTP client");
+        (client, token)
+    })
+}
+
+fn resolve_token() -> Option<String> {
+    // 1. GITHUB_TOKEN env
+    if let Ok(t) = std::env::var("GITHUB_TOKEN") {
+        if !t.is_empty() { return Some(t); }
+    }
+    // 2. GH_TOKEN env
+    if let Ok(t) = std::env::var("GH_TOKEN") {
+        if !t.is_empty() { return Some(t); }
+    }
+    // 3. Config files: our own first, then gh's
+    let config_dir = std::env::var("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").expect("HOME not set");
+            std::path::PathBuf::from(home).join(".config")
+        });
+    for subdir in ["prview", "gh"] {
+        if let Some(token) = read_token_from_hosts_yml(&config_dir.join(subdir).join("hosts.yml")) {
+            return Some(token);
+        }
+    }
+    None
+}
+
+fn read_token_from_hosts_yml(path: &std::path::Path) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let mut in_github = false;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("github.com") {
+            in_github = true;
+            continue;
+        }
+        if in_github && !line.starts_with(' ') && !line.starts_with('\t') {
+            break;
+        }
+        if in_github {
+            if let Some(rest) = trimmed.strip_prefix("oauth_token:") {
+                let token = rest.trim().to_string();
+                if !token.is_empty() { return Some(token); }
+            }
+        }
+    }
+    None
+}
+
+async fn graphql(query: &str) -> Result<Vec<u8>, BoxErr> {
+    let (client, token) = get_client();
+    let resp = client
+        .post("https://api.github.com/graphql")
+        .bearer_auth(token)
+        .json(&serde_json::json!({"query": query}))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("GitHub API error ({}): {}", status, body).into());
+    }
+    Ok(resp.bytes().await?.to_vec())
+}
+
+async fn rest_get(endpoint: &str) -> Result<Vec<u8>, BoxErr> {
+    let (client, token) = get_client();
+    let url = format!("https://api.github.com/{}", endpoint);
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("GitHub API error ({}): {}", status, body).into());
+    }
+    Ok(resp.bytes().await?.to_vec())
+}
 
 const MY_PR_FIELDS: &str = "
   number title url
@@ -262,18 +358,12 @@ async fn run_issue_query(search_filter: &str, fields: &str) -> Result<Vec<GqlIss
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 eprintln!("Retrying issue GraphQL query (attempt {})", attempt + 1);
             }
-            let output = tokio::process::Command::new("gh")
-                .args(["api", "graphql", "-f", &format!("query={}", query)])
-                .output()
-                .await
-                .map_err(|e| format!("Failed to run 'gh': {}", e))?;
+            let body = match graphql(&query).await {
+                Ok(b) => b,
+                Err(e) => { last_err = Some(e.to_string()); continue; }
+            };
 
-            if !output.status.success() {
-                last_err = Some(String::from_utf8_lossy(&output.stderr).to_string());
-                continue;
-            }
-
-            match serde_json::from_slice::<GqlIssueResponse>(&output.stdout) {
+            match serde_json::from_slice::<GqlIssueResponse>(&body) {
                 Ok(r) => { resp = Some(r); break; }
                 Err(e) => { last_err = Some(format!("JSON parse error: {}", e)); continue; }
             }
@@ -359,18 +449,12 @@ async fn run_query(search_filter: &str, fields: &str) -> Result<Vec<GqlPr>, Box<
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 eprintln!("Retrying GraphQL query (attempt {})", attempt + 1);
             }
-            let output = tokio::process::Command::new("gh")
-                .args(["api", "graphql", "-f", &format!("query={}", query)])
-                .output()
-                .await
-                .map_err(|e| format!("Failed to run 'gh': {}", e))?;
+            let body = match graphql(&query).await {
+                Ok(b) => b,
+                Err(e) => { last_err = Some(e.to_string()); continue; }
+            };
 
-            if !output.status.success() {
-                last_err = Some(String::from_utf8_lossy(&output.stderr).to_string());
-                continue;
-            }
-
-            match serde_json::from_slice::<GqlResponse>(&output.stdout) {
+            match serde_json::from_slice::<GqlResponse>(&body) {
                 Ok(r) => { resp = Some(r); break; }
                 Err(e) => { last_err = Some(format!("JSON parse error: {}", e)); continue; }
             }
@@ -429,14 +513,10 @@ async fn check_ci_approval_needed(repo: &str, head_sha: &str) -> bool {
         return false;
     }
     let endpoint = format!("repos/{}/actions/runs?head_sha={}&status=action_required&per_page=1", repo, head_sha);
-    let output = tokio::process::Command::new("gh")
-        .args(["api", &endpoint, "--jq", ".total_count"])
-        .output()
-        .await;
-    match output {
-        Ok(o) if o.status.success() => {
-            let s = String::from_utf8_lossy(&o.stdout);
-            s.trim().parse::<i64>().unwrap_or(0) > 0
+    match rest_get(&endpoint).await {
+        Ok(body) => {
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            v.get("total_count").and_then(|c| c.as_i64()).unwrap_or(0) > 0
         }
         _ => false,
     }
@@ -780,17 +860,9 @@ pub async fn fetch_pr_details(repo: &str, number: i64, include_landing: bool) ->
         owner, name, number
     );
 
-    let output = tokio::process::Command::new("gh")
-        .args(["api", "graphql", "-f", &format!("query={}", query)])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run 'gh': {}", e))?;
+    let body = graphql(&query).await?;
 
-    if !output.status.success() {
-        return Err(format!("GraphQL error: {}", String::from_utf8_lossy(&output.stderr)).into());
-    }
-
-    let resp: DetailResponse = serde_json::from_slice(&output.stdout)?;
+    let resp: DetailResponse = serde_json::from_slice(&body)?;
     let pr = &resp.data.repository.pull_request;
 
     // Collect all context nodes (paginate if needed)
@@ -824,17 +896,12 @@ pub async fn fetch_pr_details(repo: &str, number: i64, include_landing: bool) ->
                     owner, name, number, after
                 );
 
-                let page_output = tokio::process::Command::new("gh")
-                    .args(["api", "graphql", "-f", &format!("query={}", page_query)])
-                    .output()
-                    .await
-                    .map_err(|e| format!("Failed to run 'gh': {}", e))?;
+                let page_body = match graphql(&page_query).await {
+                    Ok(b) => b,
+                    Err(_) => break,
+                };
 
-                if !page_output.status.success() {
-                    break;
-                }
-
-                let page_resp: ContextPageResponse = serde_json::from_slice(&page_output.stdout)?;
+                let page_resp: ContextPageResponse = serde_json::from_slice(&page_body)?;
                 if let Some(cn) = page_resp.data.repository.pull_request.commits.nodes.first() {
                     if let Some(r) = &cn.commit.status_check_rollup {
                         all_context_nodes.extend(r.contexts.nodes.iter().cloned());
