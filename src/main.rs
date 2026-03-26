@@ -23,12 +23,12 @@ struct Args {
     port: u16,
 
     /// Path to TLS certificate file (PEM)
-    #[arg(long, default_value = "/etc/ssl/certs/devgpu035.nha1.facebook.com.crt")]
-    cert: PathBuf,
+    #[arg(long)]
+    cert: Option<PathBuf>,
 
     /// Path to TLS private key file (PEM)
-    #[arg(long, default_value = "/etc/ssl/certs/devgpu035.nha1.facebook.com.key")]
-    key: PathBuf,
+    #[arg(long)]
+    key: Option<PathBuf>,
 
     /// Path to SQLite database file
     #[arg(long, default_value = "~/.prview.db")]
@@ -42,6 +42,18 @@ struct Args {
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let args = Args::parse();
+
+    // Resolve cert/key paths from current hostname if not specified
+    let fqdn = hostname::get()
+        .expect("Failed to get hostname")
+        .to_string_lossy()
+        .into_owned();
+    let cert = args
+        .cert
+        .unwrap_or_else(|| PathBuf::from(format!("/etc/ssl/certs/{}.crt", fqdn)));
+    let key = args
+        .key
+        .unwrap_or_else(|| PathBuf::from(format!("/etc/ssl/certs/{}.key", fqdn)));
 
     // Expand ~ in db path
     let db_path = if args.db.starts_with("~") {
@@ -83,20 +95,14 @@ async fn main() -> std::io::Result<()> {
 
     let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
     builder
-        .set_private_key_file(&args.key, SslFiletype::PEM)
-        .unwrap_or_else(|e| panic!("Failed to load key {:?}: {}", args.key, e));
+        .set_private_key_file(&key, SslFiletype::PEM)
+        .unwrap_or_else(|e| panic!("Failed to load key {:?}: {}", key, e));
     builder
-        .set_certificate_chain_file(&args.cert)
-        .unwrap_or_else(|e| panic!("Failed to load cert {:?}: {}", args.cert, e));
+        .set_certificate_chain_file(&cert)
+        .unwrap_or_else(|e| panic!("Failed to load cert {:?}: {}", cert, e));
 
-    let hostname = hostname::get()
-        .map(|h| {
-            let name = h.to_string_lossy().into_owned();
-            name.replace(".facebook.com", ".fbinfra.net")
-        })
-        .unwrap_or_else(|_| "localhost".to_string());
-
-    println!("https://{}:{}", hostname, args.port);
+    let display_host = fqdn.replace(".facebook.com", ".fbinfra.net");
+    println!("https://{}:{}", display_host, args.port);
 
     let db_data = actix_web::web::Data::new(db);
     let tx_data = actix_web::web::Data::new(tx);
