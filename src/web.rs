@@ -54,11 +54,20 @@ struct UserQuery {
     user: Option<String>,
 }
 
+const APP_ICON_SVG: &str = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect width='128' height='128' rx='24' fill='#0f172a'/><circle cx='40' cy='36' r='10' fill='none' stroke='#818cf8' stroke-width='7'/><line x1='40' y1='46' x2='40' y2='92' stroke='#818cf8' stroke-width='7' stroke-linecap='round'/><circle cx='88' cy='92' r='10' fill='none' stroke='#818cf8' stroke-width='7'/><line x1='88' y1='82' x2='88' y2='56' stroke='#818cf8' stroke-width='7' stroke-linecap='round'/><path d='M88 56 L76 48 M88 56 L76 64' fill='none' stroke='#818cf8' stroke-width='7' stroke-linecap='round' stroke-linejoin='round'/></svg>";
+
 #[get("/")]
 pub async fn index() -> HttpResponse {
     HttpResponse::Ok()
         .content_type("text/html")
         .body(PAGE_HTML)
+}
+
+#[get("/icon.svg")]
+pub async fn icon() -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type("image/svg+xml")
+        .body(APP_ICON_SVG)
 }
 
 /// Drop guard that unregisters the user from active_users when the SSE stream is dropped.
@@ -247,8 +256,8 @@ const PAGE_HTML: &str = r##"<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PRView</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect width='128' height='128' rx='24' fill='%230f172a'/><circle cx='40' cy='36' r='10' fill='none' stroke='%23818cf8' stroke-width='7'/><line x1='40' y1='46' x2='40' y2='92' stroke='%23818cf8' stroke-width='7' stroke-linecap='round'/><circle cx='88' cy='92' r='10' fill='none' stroke='%23818cf8' stroke-width='7'/><line x1='88' y1='82' x2='88' y2='56' stroke='%23818cf8' stroke-width='7' stroke-linecap='round'/><path d='M88 56 L76 48 M88 56 L76 64' fill='none' stroke='%23818cf8' stroke-width='7' stroke-linecap='round' stroke-linejoin='round'/></svg>">
-<link rel="manifest" href="data:application/json,{%22name%22:%22PRView%22,%22short_name%22:%22PRView%22,%22display%22:%22standalone%22,%22background_color%22:%22%230f172a%22,%22theme_color%22:%22%230f172a%22}">
+<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="manifest" href="data:application/json,{%22name%22:%22PRView%22,%22short_name%22:%22PRView%22,%22display%22:%22standalone%22,%22background_color%22:%22%230f172a%22,%22theme_color%22:%22%230f172a%22,%22icons%22:[{%22src%22:%22/icon.svg%22,%22sizes%22:%22any%22,%22type%22:%22image/svg+xml%22,%22purpose%22:%22any%20maskable%22}]}">
 <style>
   :root {
     --bg-body: #0f172a;

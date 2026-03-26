@@ -129,6 +129,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(nudge_data.clone())
             .app_data(active_users_data.clone())
             .service(web::index)
+            .service(web::icon)
             .service(web::events)
             .service(web::api_toggle_hidden)
             .service(web::api_toggle_review_read)
