@@ -37,11 +37,17 @@ struct Args {
     /// How often to fetch PRs from GitHub (e.g. "5m", "30s", "1h")
     #[arg(long, default_value = "1m", value_parser = humantime::parse_duration)]
     interval: Duration,
+
+    /// HTTP proxy URL (e.g. "http://fwdproxy:8080")
+    #[arg(long)]
+    proxy: Option<String>,
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let args = Args::parse();
+
+    github::init_client(args.proxy.as_deref());
 
     // Resolve cert/key paths from current hostname if not specified
     let fqdn = hostname::get()

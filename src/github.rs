@@ -9,15 +9,24 @@ type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 
 static CLIENT: OnceLock<(Client, String)> = OnceLock::new();
 
-fn get_client() -> &'static (Client, String) {
+/// Call from main() before any GitHub requests to configure the HTTP client.
+pub fn init_client(proxy: Option<&str>) {
     CLIENT.get_or_init(|| {
         let token = resolve_token().expect("Could not find GitHub token. Set GITHUB_TOKEN env var or authenticate with `gh auth login`.");
-        let client = Client::builder()
-            .user_agent("prview")
-            .build()
-            .expect("Failed to build HTTP client");
+        let mut builder = Client::builder().user_agent("prview");
+        if let Some(proxy_url) = proxy {
+            builder = builder.proxy(
+                reqwest::Proxy::all(proxy_url)
+                    .unwrap_or_else(|e| panic!("Invalid proxy URL {:?}: {}", proxy_url, e))
+            );
+        }
+        let client = builder.build().expect("Failed to build HTTP client");
         (client, token)
-    })
+    });
+}
+
+fn get_client() -> &'static (Client, String) {
+    CLIENT.get().expect("GitHub client not initialized — call github::init_client() first")
 }
 
 fn resolve_token() -> Option<String> {
