@@ -265,7 +265,8 @@ async fn run_issue_query(search_filter: &str, fields: &str) -> Result<Vec<GqlIss
             let output = tokio::process::Command::new("gh")
                 .args(["api", "graphql", "-f", &format!("query={}", query)])
                 .output()
-                .await?;
+                .await
+                .map_err(|e| format!("Failed to run 'gh': {}", e))?;
 
             if !output.status.success() {
                 last_err = Some(String::from_utf8_lossy(&output.stderr).to_string());
@@ -361,7 +362,8 @@ async fn run_query(search_filter: &str, fields: &str) -> Result<Vec<GqlPr>, Box<
             let output = tokio::process::Command::new("gh")
                 .args(["api", "graphql", "-f", &format!("query={}", query)])
                 .output()
-                .await?;
+                .await
+                .map_err(|e| format!("Failed to run 'gh': {}", e))?;
 
             if !output.status.success() {
                 last_err = Some(String::from_utf8_lossy(&output.stderr).to_string());
@@ -781,7 +783,8 @@ pub async fn fetch_pr_details(repo: &str, number: i64, include_landing: bool) ->
     let output = tokio::process::Command::new("gh")
         .args(["api", "graphql", "-f", &format!("query={}", query)])
         .output()
-        .await?;
+        .await
+        .map_err(|e| format!("Failed to run 'gh': {}", e))?;
 
     if !output.status.success() {
         return Err(format!("GraphQL error: {}", String::from_utf8_lossy(&output.stderr)).into());
@@ -824,7 +827,8 @@ pub async fn fetch_pr_details(repo: &str, number: i64, include_landing: bool) ->
                 let page_output = tokio::process::Command::new("gh")
                     .args(["api", "graphql", "-f", &format!("query={}", page_query)])
                     .output()
-                    .await?;
+                    .await
+                    .map_err(|e| format!("Failed to run 'gh': {}", e))?;
 
                 if !page_output.status.success() {
                     break;
