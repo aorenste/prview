@@ -31,7 +31,7 @@ struct Args {
     key: PathBuf,
 
     /// Path to SQLite database file
-    #[arg(long, default_value = "prview.db")]
+    #[arg(long, default_value = "~/.prview.db")]
     db: PathBuf,
 
     /// How often to fetch PRs from GitHub (e.g. "5m", "30s", "1h")
@@ -43,7 +43,15 @@ struct Args {
 async fn main() -> std::io::Result<()> {
     let args = Args::parse();
 
-    let conn = db::init_db(&args.db);
+    // Expand ~ in db path
+    let db_path = if args.db.starts_with("~") {
+        let home = std::env::var("HOME").expect("HOME not set");
+        PathBuf::from(home).join(args.db.strip_prefix("~").unwrap())
+    } else {
+        args.db.clone()
+    };
+
+    let conn = db::init_db(&db_path);
     let db = Arc::new(Mutex::new(conn));
 
     let (tx, _) = tokio::sync::broadcast::channel::<worker::UpdateBatch>(64);
