@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PRView</title>
+<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="manifest" href="data:application/json,{%22name%22:%22PRView%22,%22short_name%22:%22PRView%22,%22display%22:%22standalone%22,%22background_color%22:%22%230f172a%22,%22theme_color%22:%22%230f172a%22,%22icons%22:[{%22src%22:%22/icon.svg%22,%22sizes%22:%22any%22,%22type%22:%22image/svg+xml%22,%22purpose%22:%22any%20maskable%22}]}">
+</head>
+<body>
+<div id="conn-error">Unable to reach server</div>
+<div id="fetch-error"></div>
+<div class="header">
+  <h1>PRView</h1>
+  <span class="badge">Live</span>
+  <button id="refresh-btn" class="refresh-btn" onclick="refreshNow()" title="Refresh now">&#x21bb;</button>
+  <div class="user-toggle">
+    <button class="chip active" id="user-me-btn" onclick="setUser('')">me</button>
+    <input type="text" id="user-input" class="user-input" placeholder="username" spellcheck="false" autocomplete="off"
+           onfocus="this.select()"
+           onkeydown="if(event.key==='Enter'){setUser(this.value);this.blur();}">
+  </div>
+</div>
+<div class="tabs">
+  <button class="tab active" data-tab="my-prs">My Open PRs <span class="tab-count" id="my-prs-count">0</span><span class="tab-count tab-count-dim" id="my-prs-draft-count" style="display:none"></span></button>
+  <button class="tab" data-tab="reviews">Needs Attention <span class="tab-count" id="reviews-count">0</span><span class="tab-count tab-count-dim" id="reviews-read-count" style="display:none"></span></button>
+  <button class="tab" data-tab="issues">My Issues <span class="tab-count" id="issues-count">0</span></button>
+</div>
+
+<div id="my-prs-panel" class="tab-panel active">
+  <div class="card">
+    <div class="filter-bar" id="my-prs-filter-bar"></div>
+    <div class="table-scroll">
+    <table>
+      <thead id="my-prs-thead">
+      </thead>
+      <tbody id="my-prs-body">
+        <tr><td colspan="9" class="empty-state">Connecting...</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+  <div id="drafts-section" class="landed-section" style="display:none">
+    <button class="landed-toggle" id="drafts-toggle" onclick="toggleDrafts()">
+      <span id="drafts-arrow">&#9654;</span> Drafts <span class="landed-count" id="drafts-count">0</span>
+    </button>
+    <div id="drafts-body" style="display:none">
+      <div class="card">
+        <div class="table-scroll">
+        <table>
+          <thead id="drafts-thead"></thead>
+          <tbody id="drafts-tbody"></tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="landed-section" class="landed-section" style="display:none">
+    <button class="landed-toggle" id="landed-toggle" onclick="toggleLanded()">
+      <span id="landed-arrow">&#9654;</span> Recently Landed <span class="landed-count" id="landed-count">0</span>
+    </button>
+    <div id="landed-body" style="display:none">
+      <table class="landed-table">
+        <tbody id="landed-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div id="reviews-panel" class="tab-panel">
+  <div class="card">
+    <div class="filter-bar" id="reviews-filter-bar"></div>
+    <div class="table-scroll">
+    <table>
+      <thead id="reviews-thead">
+      </thead>
+      <tbody id="reviews-body">
+        <tr><td colspan="10" class="empty-state">Connecting...</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+</div>
+
+<div id="issues-panel" class="tab-panel">
+  <div class="card">
+    <div class="table-scroll">
+    <table>
+      <thead id="issues-thead">
+      </thead>
+      <tbody id="issues-body">
+        <tr><td colspan="7" class="empty-state">Connecting...</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
