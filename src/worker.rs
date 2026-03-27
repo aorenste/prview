@@ -128,23 +128,17 @@ pub async fn fetch_details_loop(
             }
         };
 
-        let mut any_stale = false;
-
         for user in &users {
             let label = if user.is_empty() { "@me" } else { user.as_str() };
 
-            // Collect stale PRs from both tables
+            // Collect PRs whose details haven't been fetched in the last 60s
             let (stale_prs, stale_reviews) = {
                 let conn = db.lock().unwrap();
                 (
-                    db::list_stale_prs(&conn, user),
-                    db::list_stale_review_prs(&conn, user),
+                    db::list_stale_prs(&conn, user, 60),
+                    db::list_stale_review_prs(&conn, user, 60),
                 )
             };
-
-            if !stale_prs.is_empty() || !stale_reviews.is_empty() {
-                any_stale = true;
-            }
 
             // Process my PRs
             for (repo, number) in &stale_prs {
@@ -219,9 +213,7 @@ pub async fn fetch_details_loop(
             }
         }
 
-        if !any_stale {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-        }
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
     }
 }
 
