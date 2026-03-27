@@ -184,7 +184,7 @@ function drciPill(pr) {
   const [cls, label] = m[pr.drci_emoji] || ['pill-muted', 'Unknown'];
   const spinning = cls === 'pill-yellow' || (pr.checks_pending > 0);
   const dot = spinning
-    ? `<span class="spinner"${cls === 'pill-red' ? ' style="border-color: var(--red); border-top-color: transparent;"' : ''}></span>`
+    ? `<span class="spinner${cls === 'pill-red' ? ' spinner-red' : ''}"></span>`
     : '<span class="pill-dot"></span>';
   return `<span class="pill ${cls}" data-tip="${tip}">${dot}${label}</span>`;
 }
@@ -196,7 +196,7 @@ function checksOverallPill(pr) {
     return '<span class="pill pill-green" data-tip="Checks passed"><span class="pill-dot"></span>Passing</span>';
   if (pr.checks_overall === 'FAILURE' || pr.checks_overall === 'ERROR') {
     if (pr.checks_running)
-      return '<span class="pill pill-red" data-tip="Checks failing, still running"><span class="spinner" style="border-color: var(--red); border-top-color: transparent;"></span>Failed</span>';
+      return '<span class="pill pill-red" data-tip="Checks failing, still running"><span class="spinner spinner-red"></span>Failed</span>';
     return '<span class="pill pill-red" data-tip="Checks failed"><span class="pill-dot"></span>Failed</span>';
   }
   return '<span class="pill pill-yellow" data-tip="Checks pending"><span class="spinner"></span>Pending</span>';
@@ -208,7 +208,7 @@ function detailedCIPill(pr) {
   const tip = `${pr.checks_success} passed, ${pr.checks_fail} failed, ${pr.checks_pending} pending`;
   if (pr.checks_fail > 0) {
     const dot = pr.checks_running
-      ? '<span class="spinner" style="border-color: var(--red); border-top-color: transparent;"></span>'
+      ? '<span class="spinner spinner-red"></span>'
       : '<span class="pill-dot"></span>';
     return `<span class="pill pill-red" data-tip="${escapeHtml(tip)}">${dot}${pr.checks_fail} failed</span>`;
   }
@@ -239,7 +239,7 @@ function reviewCombinedPill(pr) {
     : reviewers.map(r => r.login + ': ' + r.state).join('\n');
   if (pr.ci_approval_needed) {
     const tip = 'CI requires approval\n' + revTip;
-    return `<span class="pill pill-red" data-tip="${escapeHtml(tip)}"><span class="spinner" style="border-color: var(--red); border-top-color: transparent;"></span>CI Approval</span>`;
+    return `<span class="pill pill-red" data-tip="${escapeHtml(tip)}"><span class="spinner spinner-red"></span>CI Approval</span>`;
   }
   if (pr.is_draft)
     return `<span class="pill pill-muted" data-tip="${escapeHtml('Draft PR\n' + revTip)}">Draft</span>`;
