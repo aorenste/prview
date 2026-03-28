@@ -140,75 +140,110 @@ pub async fn fetch_details_loop(
                 )
             };
 
-            // Process my PRs
+            // Group by repo: (number, include_landing) — my PRs get true, reviews get false
+            let mut by_repo: HashMap<String, Vec<(i64, bool)>> = HashMap::new();
+            // Track which table each PR belongs to for updating DB + SSE
+            let mut is_my_pr: std::collections::HashSet<(String, i64)> = std::collections::HashSet::new();
+            let mut is_review_pr: std::collections::HashSet<(String, i64)> = std::collections::HashSet::new();
+
             for (repo, number) in &stale_prs {
-                match github::fetch_pr_details(repo, *number, true).await {
-                    Ok(details) => {
-                        let pr = {
-                            let conn = db.lock().unwrap();
-                            db::update_pr_details(&conn, repo, *number, user, &details);
-                            db::get_pr(&conn, repo, *number, user)
-                        };
-                        if let Some(pr) = pr {
-                            log!("[{}] Detail: {}#{} ({} pass, {} fail, {} pending{})",
-                                label, repo, number,
-                                details.checks_success, details.checks_fail, details.checks_pending,
-                                if details.landing_status.is_empty() { String::new() }
-                                else { format!(", land: {}", details.landing_status) });
-                            let hidden_count = {
-                                let conn = db.lock().unwrap();
-                                db::hidden_count(&conn, user)
-                            };
-                            let _ = tx.send(UpdateBatch {
-                                target_user: user.clone(),
-                                pr_updates: vec![PrUpdate::Changed(pr)],
-                                review_updates: vec![],
-                                merged_prs: vec![],
-                                issue_updates: vec![],
-                                hidden_count,
-                                error: None,
-                            });
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    }
-                    Err(e) => {
-                        log!("[{}] Detail error: {}#{}: {}", label, repo, number, e);
-                    }
+                by_repo.entry(repo.clone()).or_default().push((*number, true));
+                is_my_pr.insert((repo.clone(), *number));
+            }
+            for (repo, number) in &stale_reviews {
+                let entry = by_repo.entry(repo.clone()).or_default();
+                if !entry.iter().any(|(n, _)| *n == *number) {
+                    entry.push((*number, false));
                 }
+                is_review_pr.insert((repo.clone(), *number));
             }
 
-            // Process review PRs
-            for (repo, number) in &stale_reviews {
-                match github::fetch_pr_details(repo, *number, false).await {
-                    Ok(details) => {
-                        let review_pr = {
-                            let conn = db.lock().unwrap();
-                            db::update_review_pr_details(&conn, repo, *number, user, &details);
-                            db::get_review_pr(&conn, repo, *number, user)
-                        };
-                        if let Some(pr) = review_pr {
-                            log!("[{}] Detail: {}#{} review ({} pass, {} fail, {} pending)",
-                                label, repo, number,
-                                details.checks_success, details.checks_fail, details.checks_pending);
-                            let hidden_count = {
+            for (repo, prs) in &by_repo {
+                // Process in chunks of DETAIL_BATCH_SIZE
+                for chunk in prs.chunks(github::DETAIL_BATCH_SIZE) {
+                    let nums: Vec<i64> = chunk.iter().map(|(n, _)| *n).collect();
+                    log!("[{}] Detail batch: {} {:?}", label, repo, nums);
+
+                    match github::fetch_pr_details_batch(repo, chunk).await {
+                        Ok((results, needs_pagination)) => {
+                            let mut pr_updates = Vec::new();
+                            let mut review_updates = Vec::new();
+
+                            for (number, details) in &results {
                                 let conn = db.lock().unwrap();
-                                db::hidden_count(&conn, user)
-                            };
-                            let _ = tx.send(UpdateBatch {
-                                target_user: user.clone(),
-                                pr_updates: vec![],
-                                review_updates: vec![ReviewPrUpdate::Changed(pr)],
-                                merged_prs: vec![],
-                                issue_updates: vec![],
-                                hidden_count,
-                                error: None,
-                            });
+                                if is_my_pr.contains(&(repo.clone(), *number)) {
+                                    db::update_pr_details(&conn, repo, *number, user, details);
+                                    if let Some(pr) = db::get_pr(&conn, repo, *number, user) {
+                                        pr_updates.push(PrUpdate::Changed(pr));
+                                    }
+                                }
+                                if is_review_pr.contains(&(repo.clone(), *number)) {
+                                    db::update_review_pr_details(&conn, repo, *number, user, details);
+                                    if let Some(pr) = db::get_review_pr(&conn, repo, *number, user) {
+                                        review_updates.push(ReviewPrUpdate::Changed(pr));
+                                    }
+                                }
+                            }
+
+                            if !pr_updates.is_empty() || !review_updates.is_empty() {
+                                let hidden_count = {
+                                    let conn = db.lock().unwrap();
+                                    db::hidden_count(&conn, user)
+                                };
+                                let _ = tx.send(UpdateBatch {
+                                    target_user: user.clone(),
+                                    pr_updates,
+                                    review_updates,
+                                    merged_prs: vec![],
+                                    issue_updates: vec![],
+                                    hidden_count,
+                                    error: None,
+                                });
+                            }
+
+                            // Fall back to individual fetches for PRs needing pagination
+                            for (number, include_landing) in &needs_pagination {
+                                if let Ok(details) = github::fetch_pr_details(repo, *number, *include_landing).await {
+                                    let conn = db.lock().unwrap();
+                                    if is_my_pr.contains(&(repo.clone(), *number)) {
+                                        db::update_pr_details(&conn, repo, *number, user, &details);
+                                        if let Some(pr) = db::get_pr(&conn, repo, *number, user) {
+                                            let hidden_count = db::hidden_count(&conn, user);
+                                            let _ = tx.send(UpdateBatch {
+                                                target_user: user.clone(),
+                                                pr_updates: vec![PrUpdate::Changed(pr)],
+                                                review_updates: vec![],
+                                                merged_prs: vec![],
+                                                issue_updates: vec![],
+                                                hidden_count,
+                                                error: None,
+                                            });
+                                        }
+                                    }
+                                    if is_review_pr.contains(&(repo.clone(), *number)) {
+                                        db::update_review_pr_details(&conn, repo, *number, user, &details);
+                                        if let Some(pr) = db::get_review_pr(&conn, repo, *number, user) {
+                                            let hidden_count = db::hidden_count(&conn, user);
+                                            let _ = tx.send(UpdateBatch {
+                                                target_user: user.clone(),
+                                                pr_updates: vec![],
+                                                review_updates: vec![ReviewPrUpdate::Changed(pr)],
+                                                merged_prs: vec![],
+                                                issue_updates: vec![],
+                                                hidden_count,
+                                                error: None,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        Err(e) => {
+                            log!("[{}] Detail batch error for {}: {}", label, repo, e);
+                        }
                     }
-                    Err(e) => {
-                        log!("[{}] Detail error: {}#{} review: {}", label, repo, number, e);
-                    }
+
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 }
             }
         }

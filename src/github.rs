@@ -12,9 +12,11 @@ static CLIENT: OnceLock<(Client, String)> = OnceLock::new();
 /// Call from main() before any GitHub requests to configure the HTTP client.
 pub fn init_client(proxy: Option<&str>) {
     CLIENT.get_or_init(|| {
-        let token = resolve_token().expect("Could not find GitHub token. Set GITHUB_TOKEN env var or authenticate with `gh auth login`.");
+        let (token, source) = resolve_token().expect("Could not find GitHub token. Set GITHUB_TOKEN env var or authenticate with `gh auth login`.");
+        log!("GitHub token from {}", source);
         let mut builder = Client::builder().user_agent("prview");
         if let Some(proxy_url) = proxy {
+            log!("Using proxy: {}", proxy_url);
             builder = builder.proxy(
                 reqwest::Proxy::all(proxy_url)
                     .unwrap_or_else(|e| panic!("Invalid proxy URL {:?}: {}", proxy_url, e))
@@ -25,18 +27,29 @@ pub fn init_client(proxy: Option<&str>) {
     });
 }
 
+/// Query GitHub for the authenticated user. Call after init_client.
+pub async fn whoami() -> String {
+    match rest_get("user").await {
+        Ok(body) => {
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            v.get("login").and_then(|l| l.as_str()).unwrap_or("unknown").to_string()
+        }
+        Err(e) => format!("error: {}", e),
+    }
+}
+
 fn get_client() -> &'static (Client, String) {
     CLIENT.get().expect("GitHub client not initialized — call github::init_client() first")
 }
 
-fn resolve_token() -> Option<String> {
+fn resolve_token() -> Option<(String, &'static str)> {
     // 1. GITHUB_TOKEN env
     if let Ok(t) = std::env::var("GITHUB_TOKEN") {
-        if !t.is_empty() { return Some(t); }
+        if !t.is_empty() { return Some((t, "GITHUB_TOKEN env")); }
     }
     // 2. GH_TOKEN env
     if let Ok(t) = std::env::var("GH_TOKEN") {
-        if !t.is_empty() { return Some(t); }
+        if !t.is_empty() { return Some((t, "GH_TOKEN env")); }
     }
     // 3. Config files: our own first, then gh's
     let config_dir = std::env::var("XDG_CONFIG_HOME")
@@ -45,10 +58,11 @@ fn resolve_token() -> Option<String> {
             let home = std::env::var("HOME").expect("HOME not set");
             std::path::PathBuf::from(home).join(".config")
         });
-    for subdir in ["prview", "gh"] {
-        if let Some(token) = read_token_from_hosts_yml(&config_dir.join(subdir).join("hosts.yml")) {
-            return Some(token);
-        }
+    if let Some(token) = read_token_from_hosts_yml(&config_dir.join("prview").join("hosts.yml")) {
+        return Some((token, "~/.config/prview/hosts.yml"));
+    }
+    if let Some(token) = read_token_from_hosts_yml(&config_dir.join("gh").join("hosts.yml")) {
+        return Some((token, "~/.config/gh/hosts.yml"));
     }
     None
 }
@@ -924,30 +938,7 @@ pub async fn fetch_pr_details(repo: &str, number: i64, include_landing: bool) ->
         }
     }
 
-    // Count CI results
-    let (mut success, mut fail, mut pending) = (0i64, 0i64, 0i64);
-    for node in &all_context_nodes {
-        if let Some(conclusion) = node.get("conclusion") {
-            // CheckRun
-            if conclusion.is_null() {
-                pending += 1; // still running
-            } else {
-                match conclusion.as_str().unwrap_or("") {
-                    "SUCCESS" | "NEUTRAL" | "SKIPPED" => success += 1,
-                    "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" => fail += 1,
-                    _ => pending += 1,
-                }
-            }
-        } else if let Some(state) = node.get("state").and_then(|s| s.as_str()) {
-            // StatusContext
-            match state {
-                "SUCCESS" => success += 1,
-                "FAILURE" | "ERROR" => fail += 1,
-                "PENDING" => pending += 1,
-                _ => pending += 1,
-            }
-        }
-    }
+    let (success, fail, pending) = count_check_contexts(&all_context_nodes);
 
     // Extract DrCI from comments
     let (drci_emoji, drci_status) = extract_drci_from_detail_comments(&pr.comments.nodes);
@@ -1042,4 +1033,143 @@ fn extract_comment_count(pr: &GqlPr) -> i64 {
         Some(c) => c.total_count.unwrap_or(0),
         None => 0,
     }
+}
+
+fn count_check_contexts(nodes: &[serde_json::Value]) -> (i64, i64, i64) {
+    let (mut success, mut fail, mut pending) = (0i64, 0i64, 0i64);
+    for node in nodes {
+        if let Some(conclusion) = node.get("conclusion") {
+            if conclusion.is_null() {
+                pending += 1;
+            } else {
+                match conclusion.as_str().unwrap_or("") {
+                    "SUCCESS" | "NEUTRAL" | "SKIPPED" => success += 1,
+                    "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" => fail += 1,
+                    _ => pending += 1,
+                }
+            }
+        } else if let Some(state) = node.get("state").and_then(|s| s.as_str()) {
+            match state {
+                "SUCCESS" => success += 1,
+                "FAILURE" | "ERROR" => fail += 1,
+                _ => pending += 1,
+            }
+        }
+    }
+    (success, fail, pending)
+}
+
+pub const DETAIL_BATCH_SIZE: usize = 8;
+
+const DETAIL_PR_FRAGMENT: &str = "
+    commits(last:1) { nodes { commit {
+      committedDate
+      statusCheckRollup {
+        contexts(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes {
+          ... on CheckRun { status conclusion }
+          ... on StatusContext { state }
+        } }
+      }
+    } } }
+    comments(last:100) { nodes { author { login } body createdAt } }
+";
+
+/// Fetch details for multiple PRs in the same repo using a single aliased GraphQL query.
+/// Returns results for each PR that parsed successfully, plus a list of PR numbers
+/// that need individual follow-up (context pagination >100 checks).
+pub async fn fetch_pr_details_batch(
+    repo: &str,
+    prs: &[(i64, bool)], // (number, include_landing)
+) -> Result<(Vec<(i64, PrDetailUpdate)>, Vec<(i64, bool)>), BoxErr> {
+    let parts: Vec<&str> = repo.splitn(2, '/').collect();
+    if parts.len() != 2 {
+        return Err(format!("Invalid repo format: {}", repo).into());
+    }
+    let (owner, name) = (parts[0], parts[1]);
+
+    // Build aliased query
+    let aliases: Vec<String> = prs.iter().map(|(num, _)| {
+        format!("    pr_{}: pullRequest(number: {}) {{{}}}", num, num, DETAIL_PR_FRAGMENT)
+    }).collect();
+
+    let query = format!(
+        "query {{\n  repository(owner: \"{}\", name: \"{}\") {{\n{}\n  }}\n}}",
+        owner, name, aliases.join("\n")
+    );
+
+    let body = graphql(&query).await?;
+    let root: serde_json::Value = serde_json::from_slice(&body)?;
+
+    let repo_obj = root
+        .get("data")
+        .and_then(|d| d.get("repository"))
+        .and_then(|r| r.as_object());
+
+    let repo_obj = match repo_obj {
+        Some(obj) => obj,
+        None => return Ok((vec![], vec![])),
+    };
+
+    let include_map: std::collections::HashMap<i64, bool> = prs.iter().copied().collect();
+    let mut results = Vec::new();
+    let mut needs_pagination = Vec::new();
+
+    for (key, val) in repo_obj {
+        let num: i64 = match key.strip_prefix("pr_").and_then(|s| s.parse().ok()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if val.is_null() {
+            continue; // PR deleted or inaccessible
+        }
+
+        let pr: DetailPr = match serde_json::from_value(val.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                log!("Warning: failed to parse detail for {}#{}: {}", repo, num, e);
+                continue;
+            }
+        };
+
+        let mut all_context_nodes = Vec::new();
+        let mut committed_date = None;
+        let mut has_more_contexts = false;
+
+        if let Some(commit_node) = pr.commits.nodes.first() {
+            committed_date = commit_node.commit.committed_date.clone();
+            if let Some(rollup) = &commit_node.commit.status_check_rollup {
+                all_context_nodes.extend(rollup.contexts.nodes.iter().cloned());
+                if rollup.contexts.page_info.has_next_page {
+                    has_more_contexts = true;
+                }
+            }
+        }
+
+        if has_more_contexts {
+            let include_landing = include_map.get(&num).copied().unwrap_or(false);
+            needs_pagination.push((num, include_landing));
+            continue;
+        }
+
+        let (success, fail, pending) = count_check_contexts(&all_context_nodes);
+        let (drci_emoji, drci_status) = extract_drci_from_detail_comments(&pr.comments.nodes);
+        let include_landing = include_map.get(&num).copied().unwrap_or(false);
+        let landing_status = if include_landing {
+            extract_landing_status(&pr.comments.nodes, committed_date.as_deref())
+        } else {
+            String::new()
+        };
+
+        results.push((num, PrDetailUpdate {
+            checks_success: success,
+            checks_fail: fail,
+            checks_pending: pending,
+            checks_running: pending > 0,
+            drci_emoji,
+            drci_status,
+            landing_status,
+        }));
+    }
+
+    Ok((results, needs_pagination))
 }

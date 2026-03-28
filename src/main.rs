@@ -62,6 +62,8 @@ async fn main() -> std::io::Result<()> {
     let args = Args::parse();
 
     github::init_client(args.proxy.as_deref());
+    let gh_user = github::whoami().await;
+    log!("Authenticated as: {} (@me)", gh_user);
 
     // Resolve cert/key paths from current hostname if not specified
     let fqdn = hostname::get()

@@ -110,7 +110,7 @@ pub struct IssueInsert {
     pub labels: String,
 }
 
-const CURRENT_VERSION: i64 = 14;
+const CURRENT_VERSION: i64 = 15;
 
 /// Each entry migrates from version (index) to version (index + 1).
 const MIGRATIONS: &[&str] = &[
@@ -313,6 +313,9 @@ const MIGRATIONS: &[&str] = &[
     // 13 -> 14: add base_ref_name for ghstack chain-based grouping
     "ALTER TABLE prs ADD COLUMN base_ref_name TEXT NOT NULL DEFAULT '';
      ALTER TABLE review_prs ADD COLUMN base_ref_name TEXT NOT NULL DEFAULT ''",
+    // 14 -> 15: track which updated_at the details were fetched for
+    "ALTER TABLE prs ADD COLUMN detail_for_updated_at TEXT NOT NULL DEFAULT '';
+     ALTER TABLE review_prs ADD COLUMN detail_for_updated_at TEXT NOT NULL DEFAULT ''",
 ];
 
 pub fn init_db(path: &Path) -> Connection {
@@ -382,7 +385,7 @@ pub fn replace_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Result<()
     conn.execute_batch(
         "CREATE TEMP TABLE IF NOT EXISTS pr_preserve AS
          SELECT target_user, repo, number, hidden, checks_success, checks_fail, checks_pending,
-                landing_status, detail_updated_at
+                landing_status, detail_updated_at, detail_for_updated_at
          FROM prs"
     )?;
     conn.execute("DELETE FROM prs WHERE target_user = ?1", rusqlite::params![user])?;
@@ -391,7 +394,8 @@ pub fn replace_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Result<()
                           is_draft, head_ref_name, base_ref_name,
                           review_status, reviewers, checks_overall, checks_running,
                           drci_status, drci_emoji, comment_count,
-                          checks_success, checks_fail, checks_pending, landing_status, detail_updated_at)
+                          checks_success, checks_fail, checks_pending, landing_status,
+                          detail_updated_at, detail_for_updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
                  COALESCE((SELECT hidden FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), 0),
                  ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
@@ -399,7 +403,8 @@ pub fn replace_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Result<()
                  COALESCE((SELECT checks_fail FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), 0),
                  COALESCE((SELECT checks_pending FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), 0),
                  COALESCE((SELECT landing_status FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), ''),
-                 COALESCE((SELECT detail_updated_at FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), ''))",
+                 COALESCE((SELECT detail_updated_at FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), ''),
+                 COALESCE((SELECT detail_for_updated_at FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), ''))",
     )?;
     for pr in prs {
         stmt.execute(rusqlite::params![
@@ -516,7 +521,8 @@ pub fn replace_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Re
     conn.execute_batch(
         "CREATE TEMP TABLE IF NOT EXISTS review_preserve AS
          SELECT target_user, repo, number, is_read, read_comment_count, read_review_status, read_head_sha, read_title,
-                checks_success, checks_fail, checks_pending, drci_emoji, drci_status, detail_updated_at
+                checks_success, checks_fail, checks_pending, drci_emoji, drci_status,
+                detail_updated_at, detail_for_updated_at
          FROM review_prs"
     )?;
 
@@ -548,7 +554,8 @@ pub fn replace_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Re
             checks_pending = rp.checks_pending,
             drci_emoji = CASE WHEN rp.drci_emoji != '' THEN rp.drci_emoji ELSE review_prs.drci_emoji END,
             drci_status = CASE WHEN rp.drci_status != '' THEN rp.drci_status ELSE review_prs.drci_status END,
-            detail_updated_at = rp.detail_updated_at
+            detail_updated_at = rp.detail_updated_at,
+            detail_for_updated_at = rp.detail_for_updated_at
          FROM temp.review_preserve rp
          WHERE review_prs.target_user = rp.target_user
            AND review_prs.repo = rp.repo
@@ -686,13 +693,15 @@ pub fn get_review_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> 
     .ok()
 }
 
-/// Returns PRs whose details haven't been fetched in the last `max_age_secs` seconds.
+/// Returns PRs whose details need refreshing: either never fetched,
+/// or fetched >max_age_secs ago AND updated_at has changed since.
 pub fn list_stale_prs(conn: &Connection, user: &str, max_age_secs: i64) -> Vec<(String, i64)> {
     let mut stmt = conn.prepare(
         "SELECT repo, number FROM prs
          WHERE target_user = ?1 AND hidden = 0
            AND (detail_updated_at = ''
-                OR (strftime('%s','now') - strftime('%s', detail_updated_at)) > ?2)"
+                OR ((strftime('%s','now') - strftime('%s', detail_updated_at)) > ?2
+                    AND detail_for_updated_at != updated_at))"
     ).unwrap();
     stmt.query_map(rusqlite::params![user, max_age_secs], |row| {
         Ok((row.get(0)?, row.get(1)?))
@@ -702,13 +711,14 @@ pub fn list_stale_prs(conn: &Connection, user: &str, max_age_secs: i64) -> Vec<(
     .collect()
 }
 
-/// Returns review PRs whose details haven't been fetched in the last `max_age_secs` seconds.
+/// Returns review PRs whose details need refreshing.
 pub fn list_stale_review_prs(conn: &Connection, user: &str, max_age_secs: i64) -> Vec<(String, i64)> {
     let mut stmt = conn.prepare(
         "SELECT repo, number FROM review_prs
          WHERE target_user = ?1
            AND (detail_updated_at = ''
-                OR (strftime('%s','now') - strftime('%s', detail_updated_at)) > ?2)"
+                OR ((strftime('%s','now') - strftime('%s', detail_updated_at)) > ?2
+                    AND detail_for_updated_at != updated_at))"
     ).unwrap();
     stmt.query_map(rusqlite::params![user, max_age_secs], |row| {
         Ok((row.get(0)?, row.get(1)?))
@@ -733,7 +743,8 @@ pub fn update_pr_details(conn: &Connection, repo: &str, number: i64, user: &str,
         "UPDATE prs SET
             checks_success = ?1, checks_fail = ?2, checks_pending = ?3, checks_running = ?4,
             drci_emoji = ?5, drci_status = ?6, landing_status = ?7,
-            detail_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            detail_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+            detail_for_updated_at = updated_at
          WHERE target_user = ?8 AND repo = ?9 AND number = ?10",
         rusqlite::params![
             d.checks_success, d.checks_fail, d.checks_pending, d.checks_running as i64,
@@ -748,7 +759,8 @@ pub fn update_review_pr_details(conn: &Connection, repo: &str, number: i64, user
         "UPDATE review_prs SET
             checks_success = ?1, checks_fail = ?2, checks_pending = ?3, checks_running = ?4,
             drci_emoji = ?5, drci_status = ?6,
-            detail_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            detail_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+            detail_for_updated_at = updated_at
          WHERE target_user = ?7 AND repo = ?8 AND number = ?9",
         rusqlite::params![
             d.checks_success, d.checks_fail, d.checks_pending, d.checks_running as i64,
