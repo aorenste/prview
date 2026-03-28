@@ -55,11 +55,73 @@ struct Args {
     /// HTTP proxy URL (e.g. "http://fwdproxy:8080")
     #[arg(long)]
     proxy: Option<String>,
+
+    /// Log file path (default: next to DB). Use "-" for stderr only.
+    #[arg(long)]
+    log: Option<String>,
+}
+
+const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+const LOG_KEEP: usize = 3; // keep .1 .2 .3
+
+fn rotate_and_open_log(path: &std::path::Path) {
+    // Rotate if current log exceeds size limit
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > MAX_LOG_SIZE {
+            for i in (1..LOG_KEEP).rev() {
+                let from = path.with_extension(format!("log.{}", i));
+                let to = path.with_extension(format!("log.{}", i + 1));
+                let _ = std::fs::rename(&from, &to);
+            }
+            let _ = std::fs::rename(path, path.with_extension("log.1"));
+            eprintln!("Log rotated");
+        }
+    }
+
+    // Open log file for append and redirect stderr to it
+    use std::os::unix::io::AsRawFd;
+    if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        unsafe {
+            libc::dup2(file.as_raw_fd(), 2); // redirect stderr
+        }
+    } else {
+        eprintln!("Warning: could not open log file {:?}", path);
+    }
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let args = Args::parse();
+
+    // Set up log file (unless "-" for stderr-only)
+    if args.log.as_deref() != Some("-") {
+        let log_path = match &args.log {
+            Some(p) => PathBuf::from(p),
+            None => {
+                let data_dir = std::env::var("XDG_DATA_HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| {
+                        let home = std::env::var("HOME").expect("HOME not set");
+                        PathBuf::from(home).join(".local/share")
+                    });
+                data_dir.join("prview/prview.log")
+            }
+        };
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        rotate_and_open_log(&log_path);
+        log!("Logging to {:?}", log_path);
+
+        // Check for rotation hourly
+        let log_path_clone = log_path.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+                rotate_and_open_log(&log_path_clone);
+            }
+        });
+    }
 
     github::init_client(args.proxy.as_deref());
     let gh_user = github::whoami().await;

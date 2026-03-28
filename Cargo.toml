@@ -9,6 +9,7 @@ async-stream = "0.3"
 futures = "0.3"
 clap = { version = "4", features = ["derive"] }
 hostname = "0.4"
+libc = "0.2"
 humantime = "2"
 openssl = "0.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
