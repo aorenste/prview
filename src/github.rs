@@ -89,6 +89,19 @@ fn read_token_from_hosts_yml(path: &std::path::Path) -> Option<String> {
     None
 }
 
+fn log_rate_limit(resp: &reqwest::Response, label: &str) {
+    let hdr = |name: &str| -> Option<i64> {
+        resp.headers().get(name)?.to_str().ok()?.parse().ok()
+    };
+    if let (Some(remaining), Some(limit)) = (hdr("x-ratelimit-remaining"), hdr("x-ratelimit-limit")) {
+        if limit > 0 && remaining * 5 < limit {
+            let resource = resp.headers().get("x-ratelimit-resource")
+                .and_then(|v| v.to_str().ok()).unwrap_or("unknown");
+            log!("WARNING: {} rate limit low: {}/{} ({})", label, remaining, limit, resource);
+        }
+    }
+}
+
 async fn graphql(query: &str) -> Result<Vec<u8>, BoxErr> {
     let (client, token) = get_client();
     let resp = client
@@ -97,6 +110,7 @@ async fn graphql(query: &str) -> Result<Vec<u8>, BoxErr> {
         .json(&serde_json::json!({"query": query}))
         .send()
         .await?;
+    log_rate_limit(&resp, "GraphQL");
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
@@ -113,6 +127,7 @@ async fn rest_get(endpoint: &str) -> Result<Vec<u8>, BoxErr> {
         .bearer_auth(token)
         .send()
         .await?;
+    log_rate_limit(&resp, "REST");
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
