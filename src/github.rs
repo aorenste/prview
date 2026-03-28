@@ -365,7 +365,7 @@ async fn run_issue_query(search_filter: &str, fields: &str) -> Result<Vec<GqlIss
         for attempt in 0..3 {
             if attempt > 0 {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                eprintln!("Retrying issue GraphQL query (attempt {})", attempt + 1);
+                log!("Retrying issue GraphQL query (attempt {})", attempt + 1);
             }
             let body = match graphql(&query).await {
                 Ok(b) => b,
@@ -456,7 +456,7 @@ async fn run_query(search_filter: &str, fields: &str) -> Result<Vec<GqlPr>, Box<
         for attempt in 0..3 {
             if attempt > 0 {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                eprintln!("Retrying GraphQL query (attempt {})", attempt + 1);
+                log!("Retrying GraphQL query (attempt {})", attempt + 1);
             }
             let body = match graphql(&query).await {
                 Ok(b) => b,
@@ -581,7 +581,7 @@ pub async fn fetch_all_prs(user: &str) -> Result<FetchResult, Box<dyn std::error
             match run_query(&landed_query, LANDED_PR_FIELDS).await {
                 Ok(nodes) => convert_landed_prs(&nodes),
                 Err(e) => {
-                    eprintln!("Warning: failed to fetch landed PRs: {}", e);
+                    log!("Warning: failed to fetch landed PRs: {}", e);
                     vec![]
                 }
             }
@@ -590,7 +590,7 @@ pub async fn fetch_all_prs(user: &str) -> Result<FetchResult, Box<dyn std::error
             match run_issue_query(&issue_query, ISSUE_FIELDS).await {
                 Ok(nodes) => convert_issues(&nodes),
                 Err(e) => {
-                    eprintln!("Warning: failed to fetch issues: {}", e);
+                    log!("Warning: failed to fetch issues: {}", e);
                     vec![]
                 }
             }

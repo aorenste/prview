@@ -337,7 +337,7 @@ pub fn init_db(path: &Path) -> Connection {
             // Legacy DB: prs table exists but no version. The table already has all
             // columns (added via old ALTER TABLE migrations). Just stamp it at version 1
             // and run remaining migrations.
-            eprintln!("Migrating legacy database to versioned schema");
+            log!("Migrating legacy database to versioned schema");
             conn.execute_batch("PRAGMA user_version = 1")
                 .expect("Failed to set user_version");
             run_migrations(&conn, 1);
@@ -363,11 +363,11 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
 fn run_migrations(conn: &Connection, from_version: i64) {
     for v in from_version..CURRENT_VERSION {
         let idx = v as usize;
-        eprintln!("Running migration {} -> {}", v, v + 1);
+        log!("Running migration {} -> {}", v, v + 1);
 
         // Migration 6->7 adds is_draft, but some v6 DBs already have it
         if v == 6 && has_column(conn, "prs", "is_draft") {
-            eprintln!("  is_draft column already exists, skipping ALTER");
+            log!("  is_draft column already exists, skipping ALTER");
         } else {
             conn.execute_batch(MIGRATIONS[idx])
                 .unwrap_or_else(|e| panic!("Migration {} -> {} failed: {}", v, v + 1, e));

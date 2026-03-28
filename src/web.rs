@@ -86,9 +86,9 @@ impl Drop for SseDropGuard {
             *count -= 1;
             if *count == 0 {
                 map.remove(&self.user);
-                eprintln!("[{}] SSE disconnected (0 conns)", label);
+                log!("[{}] SSE disconnected (0 conns)", label);
             } else {
-                eprintln!("[{}] SSE disconnected ({} conn{})",
+                log!("[{}] SSE disconnected ({} conn{})",
                     label, count, if *count == 1 { "" } else { "s" });
             }
         }
@@ -110,7 +110,7 @@ pub async fn events(
         let mut map = active_users.lock().unwrap();
         let count = map.entry(user.clone()).or_insert(0);
         *count += 1;
-        eprintln!("[{}] SSE connected ({} conn{})",
+        log!("[{}] SSE connected ({} conn{})",
             if user.is_empty() { "@me" } else { &user }, count, if *count == 1 { "" } else { "s" });
     }
 
@@ -159,7 +159,7 @@ pub async fn events(
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
-                            eprintln!("SSE client lagged, missed {} messages", n);
+                            log!("SSE client lagged, missed {} messages", n);
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }

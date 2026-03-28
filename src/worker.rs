@@ -73,11 +73,11 @@ pub async fn fetch_prs_loop(
             match fetch_and_store(&db, &tx, user).await {
                 Ok((my_count, review_count)) => {
                     let conns = active_users.lock().unwrap().get(user).copied().unwrap_or(0);
-                    eprintln!("[{}] Fetched {} open PRs, {} review-requested PRs ({} conn{})",
+                    log!("[{}] Fetched {} open PRs, {} review-requested PRs ({} conn{})",
                         label, my_count, review_count, conns, if conns == 1 { "" } else { "s" });
                 }
                 Err(e) => {
-                    eprintln!("[{}] Error fetching PRs: {}",
+                    log!("[{}] Error fetching PRs: {}",
                         label, e);
                     let _ = tx.send(UpdateBatch {
                         target_user: user.clone(),
@@ -94,7 +94,7 @@ pub async fn fetch_prs_loop(
 
         // If nudged during fetch, skip the sleep and loop immediately
         if nudge.load(Ordering::Relaxed) {
-            eprintln!("Refresh requested during fetch, re-fetching immediately");
+            log!("Refresh requested during fetch, re-fetching immediately");
             continue;
         }
 
@@ -106,7 +106,7 @@ pub async fn fetch_prs_loop(
             tokio::time::sleep(std::time::Duration::from_millis(check_interval)).await;
             elapsed += check_interval;
             if nudge.load(Ordering::Relaxed) {
-                eprintln!("Manual refresh requested");
+                log!("Manual refresh requested");
                 break;
             }
         }
@@ -150,7 +150,7 @@ pub async fn fetch_details_loop(
                             db::get_pr(&conn, repo, *number, user)
                         };
                         if let Some(pr) = pr {
-                            eprintln!("[{}] Detail: {}#{} ({} pass, {} fail, {} pending{})",
+                            log!("[{}] Detail: {}#{} ({} pass, {} fail, {} pending{})",
                                 label, repo, number,
                                 details.checks_success, details.checks_fail, details.checks_pending,
                                 if details.landing_status.is_empty() { String::new() }
@@ -172,7 +172,7 @@ pub async fn fetch_details_loop(
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
                     Err(e) => {
-                        eprintln!("[{}] Detail error: {}#{}: {}", label, repo, number, e);
+                        log!("[{}] Detail error: {}#{}: {}", label, repo, number, e);
                     }
                 }
             }
@@ -187,7 +187,7 @@ pub async fn fetch_details_loop(
                             db::get_review_pr(&conn, repo, *number, user)
                         };
                         if let Some(pr) = review_pr {
-                            eprintln!("[{}] Detail: {}#{} review ({} pass, {} fail, {} pending)",
+                            log!("[{}] Detail: {}#{} review ({} pass, {} fail, {} pending)",
                                 label, repo, number,
                                 details.checks_success, details.checks_fail, details.checks_pending);
                             let hidden_count = {
@@ -207,7 +207,7 @@ pub async fn fetch_details_loop(
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
                     Err(e) => {
-                        eprintln!("[{}] Detail error: {}#{} review: {}", label, repo, number, e);
+                        log!("[{}] Detail error: {}#{} review: {}", label, repo, number, e);
                     }
                 }
             }

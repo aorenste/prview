@@ -1,3 +1,17 @@
+macro_rules! log {
+    ($($arg:tt)*) => {{
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let secs = (now % 86400) as u32;
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        let s = secs % 60;
+        eprintln!("{:02}:{:02}:{:02} {}", h, m, s, format_args!($($arg)*));
+    }};
+}
+
 mod db;
 mod github;
 mod web;
@@ -81,7 +95,7 @@ async fn main() -> std::io::Result<()> {
     let (tx, _) = tokio::sync::broadcast::channel::<worker::UpdateBatch>(64);
 
     let build_hash = web::build_hash();
-    eprintln!("Build hash: {}", build_hash);
+    log!("Build hash: {}", build_hash);
 
     let nudge = Arc::new(AtomicBool::new(false));
     let active_users = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
@@ -92,7 +106,7 @@ async fn main() -> std::io::Result<()> {
     let nudge_clone = nudge.clone();
     let active_users_clone = active_users.clone();
     let interval = args.interval;
-    eprintln!("Refresh interval: {}", humantime::format_duration(interval));
+    log!("Refresh interval: {}", humantime::format_duration(interval));
     tokio::spawn(async move {
         worker::fetch_prs_loop(db_clone, interval, tx_clone, nudge_clone, active_users_clone).await;
     });
