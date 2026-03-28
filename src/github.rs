@@ -1,4 +1,5 @@
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use reqwest::Client;
 use serde::Deserialize;
@@ -8,6 +9,49 @@ use crate::db::PrInsert;
 type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 
 static CLIENT: OnceLock<(Client, String)> = OnceLock::new();
+
+/// Epoch second when rate limit backoff expires. 0 = not rate limited.
+static RATE_LIMITED_UNTIL: AtomicU64 = AtomicU64::new(0);
+
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Returns true if we're currently rate-limited.
+pub fn is_rate_limited() -> bool {
+    let until = RATE_LIMITED_UNTIL.load(Ordering::Relaxed);
+    until > 0 && now_epoch() < until
+}
+
+/// Returns how many minutes remain on the backoff, or 0 if not limited.
+pub fn rate_limited_minutes_remaining() -> u64 {
+    let until = RATE_LIMITED_UNTIL.load(Ordering::Relaxed);
+    let now = now_epoch();
+    if until > now { (until - now + 59) / 60 } else { 0 }
+}
+
+fn check_rate_limited() -> Result<(), BoxErr> {
+    if is_rate_limited() {
+        let mins = rate_limited_minutes_remaining();
+        Err(format!("Rate limited by GitHub — backing off for ~{} more min", mins).into())
+    } else {
+        Ok(())
+    }
+}
+
+fn set_rate_limited(resp: &reqwest::Response) {
+    // Use x-ratelimit-reset if available, otherwise back off 60 minutes
+    let until = resp.headers().get("x-ratelimit-reset")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or_else(|| now_epoch() + 3600);
+    RATE_LIMITED_UNTIL.store(until, Ordering::Relaxed);
+    let mins = (until.saturating_sub(now_epoch()) + 59) / 60;
+    log!("RATE LIMITED by GitHub! Backing off for ~{} min (until reset)", mins);
+}
 
 /// Call from main() before any GitHub requests to configure the HTTP client.
 pub fn init_client(proxy: Option<&str>) {
@@ -103,6 +147,7 @@ fn log_rate_limit(resp: &reqwest::Response, label: &str) {
 }
 
 async fn graphql(query: &str) -> Result<Vec<u8>, BoxErr> {
+    check_rate_limited()?;
     let (client, token) = get_client();
     let resp = client
         .post("https://api.github.com/graphql")
@@ -111,6 +156,16 @@ async fn graphql(query: &str) -> Result<Vec<u8>, BoxErr> {
         .send()
         .await?;
     log_rate_limit(&resp, "GraphQL");
+    if resp.status() == 403 || resp.status() == 429 {
+        if resp.headers().get("x-ratelimit-remaining")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<i64>().ok()) == Some(0)
+        {
+            set_rate_limited(&resp);
+        }
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("GitHub rate limit exceeded: {}", body).into());
+    }
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
@@ -120,6 +175,7 @@ async fn graphql(query: &str) -> Result<Vec<u8>, BoxErr> {
 }
 
 async fn rest_get(endpoint: &str) -> Result<Vec<u8>, BoxErr> {
+    check_rate_limited()?;
     let (client, token) = get_client();
     let url = format!("https://api.github.com/{}", endpoint);
     let resp = client
@@ -128,6 +184,16 @@ async fn rest_get(endpoint: &str) -> Result<Vec<u8>, BoxErr> {
         .send()
         .await?;
     log_rate_limit(&resp, "REST");
+    if resp.status() == 403 || resp.status() == 429 {
+        if resp.headers().get("x-ratelimit-remaining")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<i64>().ok()) == Some(0)
+        {
+            set_rate_limited(&resp);
+        }
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("GitHub rate limit exceeded: {}", body).into());
+    }
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
