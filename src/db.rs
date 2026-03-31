@@ -110,7 +110,7 @@ pub struct IssueInsert {
     pub labels: String,
 }
 
-const CURRENT_VERSION: i64 = 15;
+const CURRENT_VERSION: i64 = 16;
 
 /// Each entry migrates from version (index) to version (index + 1).
 const MIGRATIONS: &[&str] = &[
@@ -316,6 +316,9 @@ const MIGRATIONS: &[&str] = &[
     // 14 -> 15: track which updated_at the details were fetched for
     "ALTER TABLE prs ADD COLUMN detail_for_updated_at TEXT NOT NULL DEFAULT '';
      ALTER TABLE review_prs ADD COLUMN detail_for_updated_at TEXT NOT NULL DEFAULT ''",
+    // 15 -> 16: track updated_at and drci_emoji at mark-read time for smarter auto-unread
+    "ALTER TABLE review_prs ADD COLUMN read_updated_at TEXT NOT NULL DEFAULT '';
+     ALTER TABLE review_prs ADD COLUMN read_drci_emoji TEXT NOT NULL DEFAULT ''",
 ];
 
 pub fn init_db(path: &Path) -> Connection {
@@ -521,6 +524,7 @@ pub fn replace_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Re
     conn.execute_batch(
         "CREATE TEMP TABLE IF NOT EXISTS review_preserve AS
          SELECT target_user, repo, number, is_read, read_comment_count, read_review_status, read_head_sha, read_title,
+                read_updated_at, read_drci_emoji,
                 checks_success, checks_fail, checks_pending, drci_emoji, drci_status,
                 detail_updated_at, detail_for_updated_at
          FROM review_prs"
@@ -569,7 +573,9 @@ pub fn replace_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Re
             read_comment_count = rp.read_comment_count,
             read_review_status = rp.read_review_status,
             read_head_sha = rp.read_head_sha,
-            read_title = rp.read_title
+            read_title = rp.read_title,
+            read_updated_at = rp.read_updated_at,
+            read_drci_emoji = rp.read_drci_emoji
          FROM temp.review_preserve rp
          WHERE review_prs.target_user = rp.target_user
            AND review_prs.repo = rp.repo
@@ -577,14 +583,21 @@ pub fn replace_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Re
            AND rp.is_read = 1"
     )?;
 
-    // Auto-unread: if tracked fields changed since last mark-read
+    // Auto-unread: two independent triggers:
+    // 1. PR actually updated (updated_at changed) AND a tracked field changed.
+    //    Guarded on updated_at so API-level jitter doesn't cause spurious unreads.
+    // 2. DrCI transitioned to passing (regardless of updated_at), since the
+    //    reviewer cares that CI is now green even if the PR wasn't otherwise touched.
     conn.execute_batch(
         "UPDATE review_prs SET is_read = 0
          WHERE is_read = 1 AND (
-            comment_count != read_comment_count
-            OR review_status != read_review_status
-            OR head_sha != read_head_sha
-            OR title != read_title
+            (updated_at != read_updated_at AND (
+                comment_count != read_comment_count
+                OR review_status != read_review_status
+                OR head_sha != read_head_sha
+                OR title != read_title
+            ))
+            OR (drci_emoji = 'white_check_mark' AND read_drci_emoji != 'white_check_mark' AND read_drci_emoji != '')
          )"
     )?;
 
@@ -641,7 +654,9 @@ pub fn set_review_read(conn: &Connection, repo: &str, number: i64, read: bool, u
                 read_comment_count = comment_count,
                 read_review_status = review_status,
                 read_head_sha = head_sha,
-                read_title = title
+                read_title = title,
+                read_updated_at = updated_at,
+                read_drci_emoji = drci_emoji
              WHERE target_user = ?1 AND repo = ?2 AND number = ?3",
             rusqlite::params![user, repo, number],
         ).ok();
