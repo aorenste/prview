@@ -281,9 +281,39 @@ async fn fetch_and_store(
     };
 
     // Single GraphQL call gets everything
-    let result = github::fetch_all_prs(user).await?;
+    let mut result = github::fetch_all_prs(user).await?;
     let my_count = result.my_prs.len();
     let review_count = result.review_prs.len();
+    let label = if user.is_empty() { "@me" } else { user };
+
+    // Check CI approval only for review PRs whose updated_at changed
+    let mut ci_check_indices = Vec::new();
+    for (i, pr) in result.review_prs.iter_mut().enumerate() {
+        let key = (pr.repo.clone(), pr.number);
+        if let Some(old) = old_reviews.get(&key) {
+            if old.updated_at == pr.updated_at {
+                // Unchanged — preserve old ci_approval_needed value
+                pr.ci_approval_needed = old.ci_approval_needed;
+                continue;
+            }
+        }
+        ci_check_indices.push(i);
+    }
+    if !ci_check_indices.is_empty() {
+        let futures: Vec<_> = ci_check_indices.iter()
+            .map(|&i| {
+                let repo = result.review_prs[i].repo.clone();
+                let sha = result.review_prs[i].head_sha.clone();
+                async move { github::check_ci_approval_needed(&repo, &sha).await }
+            })
+            .collect();
+        let results = futures::future::join_all(futures).await;
+        for (&idx, needed) in ci_check_indices.iter().zip(results) {
+            result.review_prs[idx].ci_approval_needed = needed;
+        }
+        log!("[{}] Checked CI approval for {} changed review PRs (of {})",
+            label, ci_check_indices.len(), review_count);
+    }
 
     {
         let conn = db.lock().unwrap();

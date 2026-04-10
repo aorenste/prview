@@ -37,6 +37,7 @@ let showHidden = loadPref('showHidden', false);
 let showDrafts = loadPref('showDrafts', false);
 let showApproved = loadPref('showApproved', false);
 let showRejected = loadPref('showRejected', false);
+let showRead = loadPref('showRead', false);
 
 // --- Sort state ---
 function loadSortPref(key, defaultCol, defaultDir) {
@@ -541,6 +542,11 @@ function renderReviews() {
   if (!showApproved) visible = visible.filter(p => p.review_status !== 'APPROVED');
   if (!showRejected) visible = visible.filter(p => p.review_status !== 'CHANGES_REQUESTED');
 
+  // Count read items before applying read filter (for tab badge and chip)
+  const unreadCount = visible.filter(p => !p.is_read).length;
+  const readCount = visible.length - unreadCount;
+  if (!showRead) visible = visible.filter(p => !p.is_read);
+
   const tbody = document.getElementById('reviews-body');
   const bar = document.getElementById('reviews-filter-bar');
 
@@ -560,6 +566,10 @@ function renderReviews() {
   if (rejectedCount > 0) {
     chips.push(`<button class="chip${showRejected ? ' active' : ''}" id="rejected-toggle">
       ${showRejected ? 'Showing' : 'Show'} ${rejectedCount} changes requested</button>`);
+  }
+  if (readCount > 0) {
+    chips.push(`<button class="chip${showRead ? ' active' : ''}" id="read-toggle">
+      ${showRead ? 'Showing' : 'Show'} ${readCount} read</button>`);
   }
   bar.innerHTML = chips.join('');
 
@@ -584,12 +594,17 @@ function renderReviews() {
       renderReviews();
     };
   }
+  if (readCount > 0) {
+    document.getElementById('read-toggle').onclick = () => {
+      showRead = !showRead;
+      savePref('showRead', showRead);
+      renderReviews();
+    };
+  }
 
   // Update count + attention pulse
   const countEl = document.getElementById('reviews-count');
   const readCountEl = document.getElementById('reviews-read-count');
-  const unreadCount = visible.filter(p => !p.is_read).length;
-  const readCount = visible.length - unreadCount;
   countEl.textContent = unreadCount;
   countEl.classList.toggle('attention', unreadCount > 5);
   if (readCount > 0) {

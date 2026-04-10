@@ -1,5 +1,5 @@
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 
 use reqwest::Client;
 use serde::Deserialize;
@@ -12,6 +12,9 @@ static CLIENT: OnceLock<(Client, String)> = OnceLock::new();
 
 /// Epoch second when rate limit backoff expires. 0 = not rate limited.
 static RATE_LIMITED_UNTIL: AtomicU64 = AtomicU64::new(0);
+
+/// Whether we already logged a "rate limit low" warning this cycle.
+static RATE_LOW_LOGGED: AtomicBool = AtomicBool::new(false);
 
 fn now_epoch() -> u64 {
     std::time::SystemTime::now()
@@ -48,9 +51,12 @@ fn set_rate_limited(resp: &reqwest::Response) {
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or_else(|| now_epoch() + 3600);
-    RATE_LIMITED_UNTIL.store(until, Ordering::Relaxed);
-    let mins = (until.saturating_sub(now_epoch()) + 59) / 60;
-    log!("RATE LIMITED by GitHub! Backing off for ~{} min (until reset)", mins);
+    let prev = RATE_LIMITED_UNTIL.swap(until, Ordering::Relaxed);
+    // Only log on the first detection (prev was 0 or already expired)
+    if prev == 0 || now_epoch() >= prev {
+        let mins = (until.saturating_sub(now_epoch()) + 59) / 60;
+        log!("RATE LIMITED by GitHub! Backing off for ~{} min (until reset)", mins);
+    }
 }
 
 /// Call from main() before any GitHub requests to configure the HTTP client.
@@ -139,9 +145,15 @@ fn log_rate_limit(resp: &reqwest::Response, label: &str) {
     };
     if let (Some(remaining), Some(limit)) = (hdr("x-ratelimit-remaining"), hdr("x-ratelimit-limit")) {
         if limit > 0 && remaining * 5 < limit {
-            let resource = resp.headers().get("x-ratelimit-resource")
-                .and_then(|v| v.to_str().ok()).unwrap_or("unknown");
-            log!("WARNING: {} rate limit low: {}/{} ({})", label, remaining, limit, resource);
+            // Only log the first low-rate warning per cycle
+            if !RATE_LOW_LOGGED.swap(true, Ordering::Relaxed) {
+                let resource = resp.headers().get("x-ratelimit-resource")
+                    .and_then(|v| v.to_str().ok()).unwrap_or("unknown");
+                log!("WARNING: {} rate limit low: {}/{} ({})", label, remaining, limit, resource);
+            }
+        } else {
+            // Rate limit recovered — reset so we log again if it drops
+            RATE_LOW_LOGGED.store(false, Ordering::Relaxed);
         }
     }
 }
@@ -612,7 +624,7 @@ fn convert_prs(nodes: &[GqlPr]) -> Vec<PrInsert> {
     }).collect()
 }
 
-async fn check_ci_approval_needed(repo: &str, head_sha: &str) -> bool {
+pub async fn check_ci_approval_needed(repo: &str, head_sha: &str) -> bool {
     if head_sha.is_empty() {
         return false;
     }
@@ -647,16 +659,7 @@ pub async fn fetch_all_prs(user: &str) -> Result<FetchResult, Box<dyn std::error
         }
     }
 
-    let mut review_prs = convert_prs(&all_review_nodes);
-
-    // Check CI approval status for review PRs in parallel
-    let futures: Vec<_> = review_prs.iter()
-        .map(|pr| check_ci_approval_needed(&pr.repo, &pr.head_sha))
-        .collect();
-    let results = futures::future::join_all(futures).await;
-    for (pr, needed) in review_prs.iter_mut().zip(results) {
-        pr.ci_approval_needed = needed;
-    }
+    let review_prs = convert_prs(&all_review_nodes);
 
     // Fetch landed PRs separately so failure doesn't block open/review PRs
     let seven_days_ago = {

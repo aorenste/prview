@@ -2,3 +2,4 @@
 Cargo.lock
 prview.db
 .claude/settings.local.json
+prview.log
