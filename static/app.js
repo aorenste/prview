@@ -290,7 +290,8 @@ function groupByStack(prs) {
   }
 
   // Build adjacency: PR with head num N is stacked on PR with head num (N-1),
-  // same prefix and same repo.
+  // same prefix and same repo. When SHA data is available, verify the link:
+  // child's base_sha must match parent's head_sha (proves same ghstack chain).
   const parentOf = new Map(); // prKey -> parent PR
   const childOf = new Map();  // prKey -> child PR
   for (const pr of prs) {
@@ -299,6 +300,8 @@ function groupByStack(prs) {
     const parentKey = pr.repo + ':' + p.prefix + ':' + (p.num - 1);
     const parent = byHeadNum.get(parentKey);
     if (parent) {
+      // Verify via commit SHAs if available (prevents cross-stack false links)
+      if (pr.base_sha && parent.head_sha && pr.base_sha !== parent.head_sha) continue;
       parentOf.set(prKey(pr), parent);
       childOf.set(prKey(parent), pr);
     }

@@ -219,6 +219,7 @@ const MY_PR_FIELDS: &str = "
   author { login }
   isDraft
   headRefName baseRefName
+  baseRef { target { oid } }
   repository { nameWithOwner }
   state createdAt updatedAt reviewDecision
   reviews(first: 20) { nodes { author { login } state } }
@@ -235,6 +236,7 @@ const REVIEW_PR_FIELDS: &str = "
   author { login }
   isDraft
   headRefName baseRefName
+  baseRef { target { oid } }
   repository { nameWithOwner }
   state createdAt updatedAt reviewDecision
   reviews(first: 20) { nodes { author { login } state } }
@@ -294,6 +296,8 @@ struct GqlPr {
     head_ref_name: String,
     #[serde(default, rename = "baseRefName")]
     base_ref_name: String,
+    #[serde(default, rename = "baseRef")]
+    base_ref: Option<GqlRef>,
     repository: GqlRepo,
     #[serde(default)]
     state: String,
@@ -334,6 +338,16 @@ impl<T> Default for GqlNodes<T> {
 struct GqlRepo {
     #[serde(rename = "nameWithOwner")]
     name_with_owner: String,
+}
+
+#[derive(Deserialize)]
+struct GqlRefTarget {
+    oid: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GqlRef {
+    target: Option<GqlRefTarget>,
 }
 
 #[derive(Deserialize)]
@@ -619,6 +633,7 @@ fn convert_prs(nodes: &[GqlPr]) -> Vec<PrInsert> {
             drci_emoji,
             comment_count,
             head_sha: extract_head_sha(pr),
+            base_sha: extract_base_sha(pr),
             ci_approval_needed: false,
         }
     }).collect()
@@ -830,6 +845,13 @@ fn extract_head_sha(pr: &GqlPr) -> String {
     pr.commits.as_ref()
         .and_then(|c| c.nodes.first())
         .and_then(|n| n.commit.oid.clone())
+        .unwrap_or_default()
+}
+
+fn extract_base_sha(pr: &GqlPr) -> String {
+    pr.base_ref.as_ref()
+        .and_then(|r| r.target.as_ref())
+        .and_then(|t| t.oid.clone())
         .unwrap_or_default()
 }
 
