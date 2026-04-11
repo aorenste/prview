@@ -825,7 +825,7 @@ fn extract_drci(pr: &GqlPr) -> (String, String) {
     for comment in comments {
         if comment.body.contains("drci-comment-start") {
             for line in comment.body.lines() {
-                if line.starts_with("## :") && !line.contains("Helpful Links") {
+                if line.starts_with("## :") && !line.contains("Helpful Links") && !line.contains("Active SEV") {
                     if let Some(rest) = line.strip_prefix("## :") {
                         if let Some(colon_pos) = rest.find(':') {
                             let emoji = rest[..colon_pos].to_string();
@@ -1077,7 +1077,7 @@ fn extract_drci_from_detail_comments(comments: &[DetailComment]) -> (String, Str
             continue;
         }
         for line in comment.body.lines() {
-            if line.starts_with("## :") && !line.contains("Helpful Links") {
+            if line.starts_with("## :") && !line.contains("Helpful Links") && !line.contains("Active SEV") {
                 if let Some(rest) = line.strip_prefix("## :") {
                     if let Some(colon_pos) = rest.find(':') {
                         let emoji = rest[..colon_pos].to_string();
