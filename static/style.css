@@ -496,7 +496,7 @@
   .landed-table .title-cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* Table horizontal scroll wrapper */
-  .table-scroll { overflow-x: auto; }
+  .table-scroll { overflow-x: hidden; }
 
   /* Column widths */
   :root {
