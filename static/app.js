@@ -644,6 +644,7 @@ function renderReviews() {
       <td class="menu-cell">
         <button class="menu-btn" onclick="toggleMenu(event)">&#x22ef;</button>
         <div class="dropdown">
+          <a href="${escapeHtml(pr.url)}" target="_blank" onclick="event.stopPropagation(); document.querySelectorAll('.dropdown.open').forEach(d => d.classList.remove('open'));">Open unread</a>
           <a href="#" onclick="setReviewRead(event, '${escapeHtml(pr.repo)}', ${pr.number}, ${menuRead})">${menuLabel}</a>
         </div>
       </td>
