@@ -25,6 +25,7 @@ pub struct PrRow {
     pub drci_emoji: String,
     pub comment_count: i64,
     pub landing_status: String,
+    pub head_sha: String,
     pub base_sha: String,
 }
 
@@ -113,7 +114,7 @@ pub struct IssueInsert {
     pub labels: String,
 }
 
-const CURRENT_VERSION: i64 = 17;
+const CURRENT_VERSION: i64 = 18;
 
 /// Each entry migrates from version (index) to version (index + 1).
 const MIGRATIONS: &[&str] = &[
@@ -325,6 +326,8 @@ const MIGRATIONS: &[&str] = &[
     // 16 -> 17: base_sha for verifying ghstack chain links
     "ALTER TABLE prs ADD COLUMN base_sha TEXT NOT NULL DEFAULT '';
      ALTER TABLE review_prs ADD COLUMN base_sha TEXT NOT NULL DEFAULT ''",
+    // 17 -> 18: head_sha for prs table (was already on review_prs)
+    "ALTER TABLE prs ADD COLUMN head_sha TEXT NOT NULL DEFAULT ''",
 ];
 
 pub fn init_db(path: &Path) -> Connection {
@@ -400,14 +403,14 @@ pub fn replace_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Result<()
     conn.execute("DELETE FROM prs WHERE target_user = ?1", rusqlite::params![user])?;
     let mut stmt = conn.prepare(
         "INSERT INTO prs (target_user, number, repo, title, url, state, created_at, updated_at, hidden,
-                          is_draft, head_ref_name, base_ref_name, base_sha,
+                          is_draft, head_ref_name, base_ref_name, head_sha, base_sha,
                           review_status, reviewers, checks_overall, checks_running,
                           drci_status, drci_emoji, comment_count,
                           checks_success, checks_fail, checks_pending, landing_status,
                           detail_updated_at, detail_for_updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
                  COALESCE((SELECT hidden FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), 0),
-                 ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19,
+                 ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
                  COALESCE((SELECT checks_success FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), 0),
                  COALESCE((SELECT checks_fail FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), 0),
                  COALESCE((SELECT checks_pending FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), 0),
@@ -419,7 +422,7 @@ pub fn replace_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Result<()
         stmt.execute(rusqlite::params![
             user,
             pr.number, pr.repo, pr.title, pr.url, pr.state, pr.created_at, pr.updated_at,
-            pr.is_draft as i64, pr.head_ref_name, pr.base_ref_name, pr.base_sha,
+            pr.is_draft as i64, pr.head_ref_name, pr.base_ref_name, pr.head_sha, pr.base_sha,
             pr.review_status, pr.reviewers, pr.checks_overall, pr.checks_running as i64,
             pr.drci_status, pr.drci_emoji, pr.comment_count,
         ])?;
@@ -433,13 +436,13 @@ pub fn list_prs(conn: &Connection, show_hidden: bool, user: &str) -> Vec<PrRow> 
         "SELECT repo, number, title, url, updated_at, hidden, is_draft, head_ref_name, base_ref_name,
                 review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count,
-                checks_success, checks_fail, checks_pending, landing_status, base_sha
+                checks_success, checks_fail, checks_pending, landing_status, head_sha, base_sha
          FROM prs WHERE target_user = ?1 ORDER BY updated_at DESC"
     } else {
         "SELECT repo, number, title, url, updated_at, hidden, is_draft, head_ref_name, base_ref_name,
                 review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count,
-                checks_success, checks_fail, checks_pending, landing_status, base_sha
+                checks_success, checks_fail, checks_pending, landing_status, head_sha, base_sha
          FROM prs WHERE target_user = ?1 AND hidden = 0 ORDER BY updated_at DESC"
     };
     let mut stmt = conn.prepare(sql).unwrap();
@@ -465,7 +468,8 @@ pub fn list_prs(conn: &Connection, show_hidden: bool, user: &str) -> Vec<PrRow> 
             checks_fail: row.get(17)?,
             checks_pending: row.get(18)?,
             landing_status: row.get(19)?,
-            base_sha: row.get(20)?,
+            head_sha: row.get(20)?,
+            base_sha: row.get(21)?,
         })
     })
     .unwrap()
@@ -478,7 +482,7 @@ pub fn get_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> Option<
         "SELECT repo, number, title, url, updated_at, hidden, is_draft, head_ref_name, base_ref_name,
                 review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count,
-                checks_success, checks_fail, checks_pending, landing_status, base_sha
+                checks_success, checks_fail, checks_pending, landing_status, head_sha, base_sha
          FROM prs WHERE target_user = ?1 AND repo = ?2 AND number = ?3",
         rusqlite::params![user, repo, number],
         |row| {
@@ -503,7 +507,8 @@ pub fn get_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> Option<
                 checks_fail: row.get(17)?,
                 checks_pending: row.get(18)?,
                 landing_status: row.get(19)?,
-                base_sha: row.get(20)?,
+                head_sha: row.get(20)?,
+                base_sha: row.get(21)?,
             })
         },
     )

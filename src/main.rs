@@ -209,6 +209,7 @@ async fn main() -> std::io::Result<()> {
             .service(web::index)
             .service(web::icon)
             .service(web::static_css)
+            .service(web::static_ghstack_js)
             .service(web::static_js)
             .service(web::events)
             .service(web::api_toggle_hidden)
