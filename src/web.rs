@@ -19,7 +19,6 @@ pub fn build_hash() -> String {
     let mut hasher = std::hash::DefaultHasher::new();
     include_str!("web.rs").hash(&mut hasher);
     include_str!("../static/style.css").hash(&mut hasher);
-    include_str!("../static/ghstack.js").hash(&mut hasher);
     include_str!("../static/app.js").hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
@@ -254,7 +253,6 @@ pub async fn api_set_user(
 }
 
 const PAGE_CSS: &str = include_str!("../static/style.css");
-const PAGE_GHSTACK_JS: &str = include_str!("../static/ghstack.js");
 const PAGE_JS: &str = include_str!("../static/app.js");
 
 const PAGE_HTML_TEMPLATE: &str = include_str!("../static/index.html");
@@ -262,7 +260,6 @@ const PAGE_HTML_TEMPLATE: &str = include_str!("../static/index.html");
 static PAGE_HTML: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     let hash = build_hash();
     PAGE_HTML_TEMPLATE.replace("style.css", &format!("style.css?v={}", hash))
-                      .replace("ghstack.js", &format!("ghstack.js?v={}", hash))
                       .replace("app.js", &format!("app.js?v={}", hash))
 });
 
@@ -273,14 +270,6 @@ pub async fn static_css() -> HttpResponse {
         .content_type("text/css")
         .insert_header(("Cache-Control", "public, max-age=31536000, immutable"))
         .body(PAGE_CSS)
-}
-
-#[get("/static/ghstack.js")]
-pub async fn static_ghstack_js() -> HttpResponse {
-    HttpResponse::Ok()
-        .content_type("application/javascript")
-        .insert_header(("Cache-Control", "public, max-age=31536000, immutable"))
-        .body(PAGE_GHSTACK_JS)
 }
 
 #[get("/static/app.js")]

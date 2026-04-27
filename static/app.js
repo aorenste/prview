@@ -259,40 +259,7 @@ function commentCell(pr) {
   return '';
 }
 
-// prKey, ghstackParse, ghstackPosition, groupByStack are defined in ghstack.js
-// (loaded via <script> before this file).
-
-function isStackOpen(stackId) {
-  return loadPref('ghstack-' + stackId, true);
-}
-
-function toggleStack(stackId) {
-  const open = !isStackOpen(stackId);
-  savePref('ghstack-' + stackId, open);
-  renderAll();
-}
-
-function renderStackedRows(items, rowFn, colCount) {
-  let html = '';
-  for (const item of items) {
-    if (item.type === 'single') {
-      html += rowFn(item.pr);
-    } else {
-      const open = isStackOpen(item.id);
-      const arrowCls = open ? ' open' : '';
-      const esc = escapeHtml(item.id);
-      html += `<tr class="stack-header-row" onclick="toggleStack('${esc}')">
-        <td colspan="${colCount}"><span class="stack-header">
-          <span class="stack-arrow${arrowCls}">&#9654;</span>
-          ghstack <span class="stack-count">${item.prs.length} PRs</span>
-        </span></td></tr>`;
-      if (open) {
-        html += item.prs.map(pr => rowFn(pr, true)).join('');
-      }
-    }
-  }
-  return html;
-}
+function prKey(pr) { return pr.repo + '#' + pr.number; }
 
 // --- My PRs tab ---
 function toggleMyPrsSort(col) {
@@ -303,11 +270,10 @@ function toggleMyPrsSort(col) {
   renderMyPrs();
 }
 
-function prRow(pr, stackChild) {
+function prRow(pr) {
   let cls = [];
   if (pr.hidden) cls.push('hidden-row');
   if (pr.is_draft) cls.push('draft-row');
-  if (stackChild) cls.push('stack-child');
   const rowClass = cls.length ? ` class="${cls.join(' ')}"` : '';
   const checked = pr.hidden ? ' checked' : '';
   return `<tr${rowClass} data-key="${escapeHtml(prKey(pr))}">
@@ -368,8 +334,7 @@ function renderMyPrs() {
     tbody.innerHTML = '<tr><td colspan="9" class="empty-state">' +
       (hasFetched ? 'No open PRs' : 'Fetching...') + '</td></tr>';
   } else {
-    const items = groupByStack(open);
-    tbody.innerHTML = renderStackedRows(items, prRow, 9);
+    tbody.innerHTML = open.map(prRow).join('');
   }
 
   // Drafts section
@@ -386,8 +351,7 @@ function renderMyPrs() {
       draftsArrow.classList.add('open');
       draftsBody.style.display = '';
       renderHeaders('drafts-thead', myPrsCols, myPrsSort, toggleMyPrsSort);
-      const draftItems = groupByStack(drafts);
-      document.getElementById('drafts-tbody').innerHTML = renderStackedRows(draftItems, prRow, 9);
+      document.getElementById('drafts-tbody').innerHTML = drafts.map(prRow).join('');
     } else {
       draftsArrow.classList.remove('open');
       draftsBody.style.display = 'none';
@@ -531,11 +495,10 @@ function renderReviews() {
     return;
   }
 
-  function reviewRow(pr, stackChild) {
+  function reviewRow(pr) {
     let cls = [];
     if (pr.is_draft) cls.push('draft-row');
     if (pr.is_read) cls.push('read-row');
-    if (stackChild) cls.push('stack-child');
     const rowClass = cls.length ? ` class="${cls.join(' ')}"` : '';
     const menuLabel = pr.is_read ? 'Mark unread' : 'Mark read';
     const menuRead = pr.is_read ? 'false' : 'true';
@@ -558,8 +521,7 @@ function renderReviews() {
       </td>
     </tr>`;
   }
-  const reviewItems = groupByStack(visible);
-  tbody.innerHTML = renderStackedRows(reviewItems, reviewRow, 10);
+  tbody.innerHTML = visible.map(reviewRow).join('');
 }
 
 // --- Issues tab ---

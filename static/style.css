@@ -416,42 +416,6 @@
   .user-input:focus { border-color: var(--accent); }
   .user-input.active-user { border-color: var(--accent); color: var(--accent); }
 
-  /* ghstack group rows */
-  .stack-header-row td {
-    background: var(--bg-header);
-    border-bottom: 1px solid var(--border);
-    padding: 6px 16px;
-    cursor: pointer;
-    user-select: none;
-  }
-  .stack-header-row:hover td { background: var(--bg-hover); }
-  .stack-header {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--text-muted);
-    font-size: 0.85em;
-    font-weight: 500;
-  }
-  .stack-arrow {
-    font-size: 10px;
-    transition: transform 0.15s;
-    display: inline-block;
-  }
-  .stack-arrow.open { transform: rotate(90deg); }
-  .stack-count {
-    background: var(--accent-bg);
-    color: var(--accent);
-    font-size: 11px;
-    padding: 1px 8px;
-    border-radius: 8px;
-    font-weight: 600;
-  }
-  .stack-child td:first-child {
-    border-left: 3px solid var(--accent);
-    padding-left: 24px;
-  }
-
   /* Recently Landed section */
   .landed-section {
     margin-top: 16px;
