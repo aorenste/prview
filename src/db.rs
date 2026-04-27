@@ -393,30 +393,34 @@ fn run_migrations(conn: &Connection, from_version: i64) {
     }
 }
 
-pub fn replace_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Result<(), rusqlite::Error> {
-    conn.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS pr_preserve AS
-         SELECT target_user, repo, number, hidden, checks_success, checks_fail, checks_pending,
-                landing_status, detail_updated_at, detail_for_updated_at
-         FROM prs"
-    )?;
-    conn.execute("DELETE FROM prs WHERE target_user = ?1", rusqlite::params![user])?;
+pub fn upsert_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Result<(), rusqlite::Error> {
+    // Upsert: never delete on absence. A PR missing from the search result is
+    // never affirmative — could be a GitHub index hiccup or a real closure.
+    // Closures are handled separately via merged_prs / direct state checks.
     let mut stmt = conn.prepare(
-        "INSERT INTO prs (target_user, number, repo, title, url, state, created_at, updated_at, hidden,
+        "INSERT INTO prs (target_user, number, repo, title, url, state, created_at, updated_at,
                           is_draft, head_ref_name, base_ref_name, head_sha, base_sha,
                           review_status, reviewers, checks_overall, checks_running,
-                          drci_status, drci_emoji, comment_count,
-                          checks_success, checks_fail, checks_pending, landing_status,
-                          detail_updated_at, detail_for_updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
-                 COALESCE((SELECT hidden FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), 0),
-                 ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
-                 COALESCE((SELECT checks_success FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), 0),
-                 COALESCE((SELECT checks_fail FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), 0),
-                 COALESCE((SELECT checks_pending FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), 0),
-                 COALESCE((SELECT landing_status FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), ''),
-                 COALESCE((SELECT detail_updated_at FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), ''),
-                 COALESCE((SELECT detail_for_updated_at FROM temp.pr_preserve WHERE target_user = ?1 AND repo = ?3 AND number = ?2), ''))",
+                          drci_status, drci_emoji, comment_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+         ON CONFLICT(target_user, repo, number) DO UPDATE SET
+           title = excluded.title,
+           url = excluded.url,
+           state = excluded.state,
+           created_at = excluded.created_at,
+           updated_at = excluded.updated_at,
+           is_draft = excluded.is_draft,
+           head_ref_name = excluded.head_ref_name,
+           base_ref_name = excluded.base_ref_name,
+           head_sha = excluded.head_sha,
+           base_sha = excluded.base_sha,
+           review_status = excluded.review_status,
+           reviewers = excluded.reviewers,
+           checks_overall = excluded.checks_overall,
+           checks_running = excluded.checks_running,
+           drci_status = excluded.drci_status,
+           drci_emoji = excluded.drci_emoji,
+           comment_count = excluded.comment_count",
     )?;
     for pr in prs {
         stmt.execute(rusqlite::params![
@@ -427,8 +431,14 @@ pub fn replace_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Result<()
             pr.drci_status, pr.drci_emoji, pr.comment_count,
         ])?;
     }
-    conn.execute_batch("DROP TABLE IF EXISTS temp.pr_preserve")?;
     Ok(())
+}
+
+pub fn delete_pr(conn: &Connection, repo: &str, number: i64, user: &str) {
+    conn.execute(
+        "DELETE FROM prs WHERE target_user = ?1 AND repo = ?2 AND number = ?3",
+        rusqlite::params![user, repo, number],
+    ).ok();
 }
 
 pub fn list_prs(conn: &Connection, show_hidden: bool, user: &str) -> Vec<PrRow> {
@@ -532,25 +542,39 @@ pub fn set_hidden(conn: &Connection, repo: &str, number: i64, hidden: i64, user:
     .ok();
 }
 
-pub fn replace_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Result<(), rusqlite::Error> {
-    // Preserve read state and detail data from old data
-    conn.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS review_preserve AS
-         SELECT target_user, repo, number, is_read, read_comment_count, read_review_status, read_head_sha, read_title,
-                read_updated_at, read_drci_emoji,
-                checks_success, checks_fail, checks_pending, drci_emoji, drci_status,
-                detail_updated_at, detail_for_updated_at
-         FROM review_prs"
-    )?;
-
-    conn.execute("DELETE FROM review_prs WHERE target_user = ?1", rusqlite::params![user])?;
+pub fn upsert_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Result<(), rusqlite::Error> {
+    // Upsert: never delete on absence. Read state, detail columns
+    // (checks_success/fail/pending), and existing drci_emoji/drci_status all
+    // survive naturally because rows aren't deleted. drci_emoji and drci_status
+    // are guarded with CASE WHEN since the lighter review-PR fetch doesn't
+    // populate them (those come from the detail fetcher).
     let mut stmt = conn.prepare(
         "INSERT INTO review_prs (target_user, number, repo, title, url, state, created_at, updated_at,
                                   author, is_draft, head_ref_name, base_ref_name,
                                   review_status, reviewers, checks_overall, checks_running,
                                   drci_status, drci_emoji, comment_count, head_sha, base_sha,
                                   ci_approval_needed)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+         ON CONFLICT(target_user, repo, number) DO UPDATE SET
+           title = excluded.title,
+           url = excluded.url,
+           state = excluded.state,
+           created_at = excluded.created_at,
+           updated_at = excluded.updated_at,
+           author = excluded.author,
+           is_draft = excluded.is_draft,
+           head_ref_name = excluded.head_ref_name,
+           base_ref_name = excluded.base_ref_name,
+           review_status = excluded.review_status,
+           reviewers = excluded.reviewers,
+           checks_overall = excluded.checks_overall,
+           checks_running = excluded.checks_running,
+           drci_status = CASE WHEN excluded.drci_status != '' THEN excluded.drci_status ELSE review_prs.drci_status END,
+           drci_emoji = CASE WHEN excluded.drci_emoji != '' THEN excluded.drci_emoji ELSE review_prs.drci_emoji END,
+           comment_count = excluded.comment_count,
+           head_sha = excluded.head_sha,
+           base_sha = excluded.base_sha,
+           ci_approval_needed = excluded.ci_approval_needed",
     )?;
     for pr in prs {
         stmt.execute(rusqlite::params![
@@ -562,39 +586,6 @@ pub fn replace_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Re
             pr.ci_approval_needed as i64,
         ])?;
     }
-
-    // Restore detail data for all PRs that still exist
-    conn.execute_batch(
-        "UPDATE review_prs SET
-            checks_success = rp.checks_success,
-            checks_fail = rp.checks_fail,
-            checks_pending = rp.checks_pending,
-            drci_emoji = CASE WHEN rp.drci_emoji != '' THEN rp.drci_emoji ELSE review_prs.drci_emoji END,
-            drci_status = CASE WHEN rp.drci_status != '' THEN rp.drci_status ELSE review_prs.drci_status END,
-            detail_updated_at = rp.detail_updated_at,
-            detail_for_updated_at = rp.detail_for_updated_at
-         FROM temp.review_preserve rp
-         WHERE review_prs.target_user = rp.target_user
-           AND review_prs.repo = rp.repo
-           AND review_prs.number = rp.number"
-    )?;
-
-    // Restore read state for read PRs
-    conn.execute_batch(
-        "UPDATE review_prs SET
-            is_read = 1,
-            read_comment_count = rp.read_comment_count,
-            read_review_status = rp.read_review_status,
-            read_head_sha = rp.read_head_sha,
-            read_title = rp.read_title,
-            read_updated_at = rp.read_updated_at,
-            read_drci_emoji = rp.read_drci_emoji
-         FROM temp.review_preserve rp
-         WHERE review_prs.target_user = rp.target_user
-           AND review_prs.repo = rp.repo
-           AND review_prs.number = rp.number
-           AND rp.is_read = 1"
-    )?;
 
     // Auto-unread: two independent triggers:
     // 1. PR actually updated (updated_at changed) AND a tracked field changed.
@@ -614,8 +605,14 @@ pub fn replace_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Re
          )"
     )?;
 
-    conn.execute_batch("DROP TABLE IF EXISTS temp.review_preserve")?;
     Ok(())
+}
+
+pub fn delete_review_pr(conn: &Connection, repo: &str, number: i64, user: &str) {
+    conn.execute(
+        "DELETE FROM review_prs WHERE target_user = ?1 AND repo = ?2 AND number = ?3",
+        rusqlite::params![user, repo, number],
+    ).ok();
 }
 
 pub fn list_review_prs(conn: &Connection, user: &str) -> Vec<ReviewPrRow> {
@@ -834,11 +831,18 @@ pub fn list_merged_prs(conn: &Connection, user: &str) -> Vec<MergedPrRow> {
     .collect()
 }
 
-pub fn replace_issues(conn: &Connection, issues: &[IssueInsert], user: &str) -> Result<(), rusqlite::Error> {
-    conn.execute("DELETE FROM issues WHERE target_user = ?1", rusqlite::params![user])?;
+pub fn upsert_issues(conn: &Connection, issues: &[IssueInsert], user: &str) -> Result<(), rusqlite::Error> {
     let mut stmt = conn.prepare(
         "INSERT INTO issues (target_user, number, repo, title, url, author, created_at, updated_at, comment_count, labels)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(target_user, repo, number) DO UPDATE SET
+           title = excluded.title,
+           url = excluded.url,
+           author = excluded.author,
+           created_at = excluded.created_at,
+           updated_at = excluded.updated_at,
+           comment_count = excluded.comment_count,
+           labels = excluded.labels",
     )?;
     for issue in issues {
         stmt.execute(rusqlite::params![

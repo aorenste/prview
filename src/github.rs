@@ -543,6 +543,10 @@ pub struct FetchResult {
     pub review_prs: Vec<PrInsert>,
     pub merged_prs: Vec<MergedPrRow>,
     pub issues: Vec<IssueInsert>,
+    /// (repo, number) of PRs the user reviewed (but didn't author) that were
+    /// closed in the last 7 days. Used to remove them from review_prs since
+    /// merged_prs only covers authored PRs.
+    pub closed_reviewed: Vec<(String, i64)>,
 }
 
 fn make_query(search_filter: &str, fields: &str, cursor: Option<&str>) -> String {
@@ -689,7 +693,11 @@ pub async fn fetch_all_prs(user: &str) -> Result<FetchResult, Box<dyn std::error
     };
     let landed_query = format!("is:pr author:{} closed:>{}", user_filter, seven_days_ago);
     let issue_query = format!("is:issue is:open assignee:{}", user_filter);
-    let (merged_prs, issues) = tokio::join!(
+    let closed_reviewed_query = format!(
+        "is:pr reviewed-by:{} -author:{} closed:>{}",
+        user_filter, user_filter, seven_days_ago
+    );
+    let (merged_prs, issues, closed_reviewed) = tokio::join!(
         async {
             match run_query(&landed_query, LANDED_PR_FIELDS).await {
                 Ok(nodes) => convert_landed_prs(&nodes),
@@ -707,6 +715,17 @@ pub async fn fetch_all_prs(user: &str) -> Result<FetchResult, Box<dyn std::error
                     vec![]
                 }
             }
+        },
+        async {
+            match run_query(&closed_reviewed_query, REVIEW_PR_FIELDS).await {
+                Ok(nodes) => nodes.iter()
+                    .map(|n| (n.repository.name_with_owner.clone(), n.number))
+                    .collect::<Vec<_>>(),
+                Err(e) => {
+                    log!("Warning: failed to fetch closed reviewed PRs: {}", e);
+                    vec![]
+                }
+            }
         }
     );
 
@@ -715,10 +734,11 @@ pub async fn fetch_all_prs(user: &str) -> Result<FetchResult, Box<dyn std::error
         review_prs,
         merged_prs,
         issues,
+        closed_reviewed,
     })
 }
 
-fn days_to_ymd(days_since_epoch: i64) -> (i64, i64, i64) {
+pub fn days_to_ymd(days_since_epoch: i64) -> (i64, i64, i64) {
     // Algorithm from https://howardhinnant.github.io/date_algorithms.html
     let z = days_since_epoch + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;

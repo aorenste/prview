@@ -315,11 +315,25 @@ async fn fetch_and_store(
             label, ci_check_indices.len(), review_count);
     }
 
+    // Upsert: never delete a row just because it's missing from a search
+    // result — absence isn't affirmative. Closures are handled below via
+    // affirmative signals (merged_prs and closed_reviewed).
     {
         let conn = db.lock().unwrap();
-        db::replace_prs(&conn, &result.my_prs, user)?;
-        db::replace_review_prs(&conn, &result.review_prs, user)?;
-        let _ = db::replace_issues(&conn, &result.issues, user);
+        db::upsert_prs(&conn, &result.my_prs, user)?;
+        db::upsert_review_prs(&conn, &result.review_prs, user)?;
+        let _ = db::upsert_issues(&conn, &result.issues, user);
+
+        // Affirmative closure signals: merged_prs (closed PRs the user
+        // authored) and closed_reviewed (closed PRs the user reviewed but
+        // didn't author). Either is grounds for removing from the open tables.
+        for pr in &result.merged_prs {
+            db::delete_pr(&conn, &pr.repo, pr.number, user);
+            db::delete_review_pr(&conn, &pr.repo, pr.number, user);
+        }
+        for (repo, number) in &result.closed_reviewed {
+            db::delete_review_pr(&conn, repo, *number, user);
+        }
     }
 
     // Compute diffs
@@ -398,7 +412,12 @@ async fn fetch_and_store(
         let conn = db.lock().unwrap();
         db::list_merged_prs(&conn, user)
     };
-    {
+    let skip_merged = !old_merged.is_empty() && result.merged_prs.is_empty();
+    if skip_merged {
+        log!("[{}] Suspicious empty merged_prs result (had {}), skipping DB replace",
+            label, old_merged.len());
+    }
+    if !skip_merged {
         let conn = db.lock().unwrap();
         let _ = db::replace_merged_prs(&conn, &result.merged_prs, user);
     }

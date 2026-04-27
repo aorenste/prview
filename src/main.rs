@@ -1,14 +1,15 @@
 macro_rules! log {
     ($($arg:tt)*) => {{
-        let now = std::time::SystemTime::now()
+        let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let secs = (now % 86400) as u32;
+        let secs = (now_secs % 86400) as u32;
         let h = secs / 3600;
         let m = (secs % 3600) / 60;
         let s = secs % 60;
-        eprintln!("{:02}:{:02}:{:02} {}", h, m, s, format_args!($($arg)*));
+        let (yr, mo, day) = $crate::github::days_to_ymd((now_secs / 86400) as i64);
+        eprintln!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} {}", yr, mo, day, h, m, s, format_args!($($arg)*));
     }};
 }
 
