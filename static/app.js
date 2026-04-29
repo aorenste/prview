@@ -482,15 +482,8 @@ function renderReviews() {
 
   // Update count + attention pulse
   const countEl = document.getElementById('reviews-count');
-  const readCountEl = document.getElementById('reviews-read-count');
   countEl.textContent = unreadCount;
   countEl.classList.toggle('attention', unreadCount > 5);
-  if (readCount > 0) {
-    readCountEl.textContent = '+' + readCount;
-    readCountEl.style.display = '';
-  } else {
-    readCountEl.style.display = 'none';
-  }
 
   if (visible.length === 0) {
     tbody.innerHTML = '<tr><td colspan="10" class="empty-state">' +
@@ -520,7 +513,7 @@ function renderReviews() {
       <td class="menu-cell">
         <button class="menu-btn" onclick="toggleMenu(event)">&#x22ef;</button>
         <div class="dropdown">
-          <a href="${escapeHtml(pr.url)}" target="_blank" onclick="event.stopPropagation(); document.querySelectorAll('.dropdown.open').forEach(d => d.classList.remove('open'));">Open unread</a>
+          <a href="${escapeHtml(pr.url)}" target="_blank" onclick="event.stopPropagation(); closeAllMenus();">Open unread</a>
           <a href="#" onclick="setReviewRead(event, '${escapeHtml(pr.repo)}', ${pr.number}, ${menuRead})">${menuLabel}</a>
           <a href="#" onclick="setReviewMention(event, '${escapeHtml(pr.repo)}', ${pr.number}, ${mentionVal})">${mentionLabel}</a>
         </div>
@@ -664,21 +657,41 @@ function toggleHidden(repo, number, hidden) {
   }
 }
 
-function toggleMenu(e) {
-  e.stopPropagation();
-  const dd = e.currentTarget.nextElementSibling;
-  document.querySelectorAll('.dropdown.open').forEach(d => { if (d !== dd) d.classList.remove('open'); });
-  dd.classList.toggle('open');
+function closeAllMenus() {
+  document.querySelectorAll('.dropdown.open').forEach(d => {
+    d.classList.remove('open');
+    d.style.cssText = '';
+  });
 }
 
-document.addEventListener('click', () => {
-  document.querySelectorAll('.dropdown.open').forEach(d => d.classList.remove('open'));
-});
+function toggleMenu(e) {
+  e.stopPropagation();
+  const btn = e.currentTarget;
+  const dd = btn.nextElementSibling;
+  const wasOpen = dd.classList.contains('open');
+  closeAllMenus();
+  if (wasOpen) return;
+  dd.classList.add('open');
+  // Use position:fixed so the dropdown escapes any overflow:hidden ancestors
+  // (notably .card). Pick above-or-below based on which half of the viewport
+  // the button is in, so it stays on screen near the top and bottom edges.
+  const r = btn.getBoundingClientRect();
+  const right = Math.max(0, window.innerWidth - r.right);
+  if (r.top < window.innerHeight / 2) {
+    dd.style.cssText = `position: fixed; right: ${right}px; top: ${r.bottom}px; bottom: auto;`;
+  } else {
+    dd.style.cssText = `position: fixed; right: ${right}px; bottom: ${window.innerHeight - r.top}px; top: auto;`;
+  }
+}
+
+document.addEventListener('click', closeAllMenus);
+window.addEventListener('scroll', closeAllMenus, true);
+window.addEventListener('resize', closeAllMenus);
 
 function setReviewRead(e, repo, number, read) {
   e.preventDefault();
   e.stopPropagation();
-  document.querySelectorAll('.dropdown.open').forEach(d => d.classList.remove('open'));
+  closeAllMenus();
   fetch('/api/toggle-review-read', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -696,7 +709,7 @@ function setReviewRead(e, repo, number, read) {
 function setReviewMention(e, repo, number, mentioned) {
   e.preventDefault();
   e.stopPropagation();
-  document.querySelectorAll('.dropdown.open').forEach(d => d.classList.remove('open'));
+  closeAllMenus();
   fetch('/api/toggle-mention', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
