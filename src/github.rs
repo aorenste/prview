@@ -10,6 +10,16 @@ type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 
 static CLIENT: OnceLock<(Client, String)> = OnceLock::new();
 
+/// Authenticated user's GitHub login. Populated by whoami(); read by code that
+/// needs to resolve "@me" / empty target_user to a real handle (e.g. mention
+/// detection in PR comments).
+static GH_USER: OnceLock<String> = OnceLock::new();
+
+/// Returns the authenticated user's login if whoami() has been called.
+pub fn cached_gh_user() -> Option<&'static str> {
+    GH_USER.get().map(|s| s.as_str())
+}
+
 /// Epoch second when rate limit backoff expires. 0 = not rate limited.
 static RATE_LIMITED_UNTIL: AtomicU64 = AtomicU64::new(0);
 
@@ -79,13 +89,15 @@ pub fn init_client(proxy: Option<&str>) {
 
 /// Query GitHub for the authenticated user. Call after init_client.
 pub async fn whoami() -> String {
-    match rest_get("user").await {
+    let login = match rest_get("user").await {
         Ok(body) => {
             let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
             v.get("login").and_then(|l| l.as_str()).unwrap_or("unknown").to_string()
         }
         Err(e) => format!("error: {}", e),
-    }
+    };
+    let _ = GH_USER.set(login.clone());
+    login
 }
 
 fn get_client() -> &'static (Client, String) {
@@ -981,7 +993,7 @@ struct ContextPage {
 
 use crate::db::PrDetailUpdate;
 
-pub async fn fetch_pr_details(repo: &str, number: i64, include_landing: bool) -> Result<PrDetailUpdate, Box<dyn std::error::Error + Send + Sync>> {
+pub async fn fetch_pr_details(repo: &str, number: i64, include_landing: bool, mention_user: &str) -> Result<PrDetailUpdate, Box<dyn std::error::Error + Send + Sync>> {
     let parts: Vec<&str> = repo.splitn(2, '/').collect();
     if parts.len() != 2 {
         return Err(format!("Invalid repo format: {}", repo).into());
@@ -1076,6 +1088,8 @@ pub async fn fetch_pr_details(repo: &str, number: i64, include_landing: bool) ->
         String::new()
     };
 
+    let mention_count = count_mentions(&pr.comments.nodes, mention_user);
+
     Ok(PrDetailUpdate {
         checks_success: success,
         checks_fail: fail,
@@ -1084,7 +1098,40 @@ pub async fn fetch_pr_details(repo: &str, number: i64, include_landing: bool) ->
         drci_emoji,
         drci_status,
         landing_status,
+        mention_count,
     })
+}
+
+/// Count comments that mention `@<user>`. Word-boundary aware so `@aorenste`
+/// doesn't match `@aorensteward`. Returns 0 if user is empty.
+fn count_mentions(comments: &[DetailComment], user: &str) -> i64 {
+    if user.is_empty() {
+        return 0;
+    }
+    let needle = format!("@{}", user.to_lowercase());
+    let mut count: i64 = 0;
+    for c in comments {
+        let body = c.body.to_lowercase();
+        let mut idx = 0;
+        let mut found = false;
+        while let Some(pos) = body[idx..].find(&needle) {
+            let abs = idx + pos;
+            let after = abs + needle.len();
+            let is_boundary = body.as_bytes().get(after).map_or(true, |&b| {
+                let ch = b as char;
+                !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+            });
+            if is_boundary {
+                found = true;
+                break;
+            }
+            idx = abs + needle.len();
+        }
+        if found {
+            count += 1;
+        }
+    }
+    count
 }
 
 fn extract_drci_from_detail_comments(comments: &[DetailComment]) -> (String, String) {
@@ -1206,6 +1253,7 @@ const DETAIL_PR_FRAGMENT: &str = "
 pub async fn fetch_pr_details_batch(
     repo: &str,
     prs: &[(i64, bool)], // (number, include_landing)
+    mention_user: &str,
 ) -> Result<(Vec<(i64, PrDetailUpdate)>, Vec<(i64, bool)>), BoxErr> {
     let parts: Vec<&str> = repo.splitn(2, '/').collect();
     if parts.len() != 2 {
@@ -1285,6 +1333,7 @@ pub async fn fetch_pr_details_batch(
         } else {
             String::new()
         };
+        let mention_count = count_mentions(&pr.comments.nodes, mention_user);
 
         results.push((num, PrDetailUpdate {
             checks_success: success,
@@ -1294,8 +1343,101 @@ pub async fn fetch_pr_details_batch(
             drci_emoji,
             drci_status,
             landing_status,
+            mention_count,
         }));
     }
 
     Ok((results, needs_pagination))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn comment(body: &str) -> DetailComment {
+        DetailComment {
+            author: None,
+            body: body.to_string(),
+            created_at: None,
+        }
+    }
+
+    #[test]
+    fn empty_user_returns_zero() {
+        let cs = vec![comment("hey @aorenste look at this")];
+        assert_eq!(count_mentions(&cs, ""), 0);
+    }
+
+    #[test]
+    fn no_mentions_returns_zero() {
+        let cs = vec![comment("just some prose"), comment("more prose")];
+        assert_eq!(count_mentions(&cs, "aorenste"), 0);
+    }
+
+    #[test]
+    fn single_mention_counts_once() {
+        let cs = vec![comment("hey @aorenste look")];
+        assert_eq!(count_mentions(&cs, "aorenste"), 1);
+    }
+
+    #[test]
+    fn multiple_comments_each_count() {
+        let cs = vec![
+            comment("hey @aorenste"),
+            comment("ping @aorenste"),
+            comment("nothing here"),
+        ];
+        assert_eq!(count_mentions(&cs, "aorenste"), 2);
+    }
+
+    #[test]
+    fn multiple_in_same_comment_counts_once() {
+        let cs = vec![comment("@aorenste @aorenste twice in one")];
+        assert_eq!(count_mentions(&cs, "aorenste"), 1);
+    }
+
+    #[test]
+    fn case_insensitive() {
+        let cs = vec![comment("hey @Aorenste"), comment("@AORENSTE")];
+        assert_eq!(count_mentions(&cs, "aorenste"), 2);
+    }
+
+    #[test]
+    fn word_boundary_blocks_longer_match() {
+        // @aorensteward should not match @aorenste
+        let cs = vec![comment("hi @aorensteward")];
+        assert_eq!(count_mentions(&cs, "aorenste"), 0);
+    }
+
+    #[test]
+    fn word_boundary_allows_punctuation() {
+        let cs = vec![
+            comment("@aorenste, please review"),
+            comment("ping @aorenste."),
+            comment("see @aorenste\nthanks"),
+        ];
+        assert_eq!(count_mentions(&cs, "aorenste"), 3);
+    }
+
+    #[test]
+    fn handle_at_end_of_body() {
+        let cs = vec![comment("ping @aorenste")];
+        assert_eq!(count_mentions(&cs, "aorenste"), 1);
+    }
+
+    #[test]
+    fn falls_through_to_real_match_after_partial() {
+        // First @aorensteward fails the boundary; the trailing @aorenste should still count.
+        let cs = vec![comment("@aorensteward and also @aorenste")];
+        assert_eq!(count_mentions(&cs, "aorenste"), 1);
+    }
+
+    #[test]
+    fn hyphen_and_underscore_are_part_of_handle() {
+        let cs = vec![
+            comment("@aorenste-ext"),
+            comment("@aorenste_other"),
+        ];
+        assert_eq!(count_mentions(&cs, "aorenste"), 0);
+    }
 }

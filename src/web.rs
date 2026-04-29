@@ -52,6 +52,14 @@ struct ToggleReadRequest {
 }
 
 #[derive(Deserialize)]
+struct ToggleMentionRequest {
+    user: Option<String>,
+    repo: String,
+    number: i64,
+    mentioned: bool,
+}
+
+#[derive(Deserialize)]
 struct UserQuery {
     user: Option<String>,
 }
@@ -214,6 +222,35 @@ pub async fn api_toggle_review_read(db: Db, tx: Tx, body: web::Json<ToggleReadRe
     let review_pr = {
         let conn = db.lock().unwrap();
         db::set_review_read(&conn, &body.repo, body.number, body.read, &user);
+        db::get_review_pr(&conn, &body.repo, body.number, &user)
+    };
+
+    if let Some(pr) = review_pr {
+        let hidden_count = {
+            let conn = db.lock().unwrap();
+            db::hidden_count(&conn, &user)
+        };
+        let batch = UpdateBatch {
+            target_user: user,
+            pr_updates: vec![],
+            review_updates: vec![crate::worker::ReviewPrUpdate::Changed(pr)],
+            merged_prs: vec![],
+            issue_updates: vec![],
+            hidden_count,
+            error: None,
+        };
+        let _ = tx.send(batch);
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({"ok": true}))
+}
+
+#[post("/api/toggle-mention")]
+pub async fn api_toggle_mention(db: Db, tx: Tx, body: web::Json<ToggleMentionRequest>) -> HttpResponse {
+    let user = body.user.clone().unwrap_or_default();
+    let review_pr = {
+        let conn = db.lock().unwrap();
+        db::set_review_mention(&conn, &body.repo, body.number, body.mentioned, &user);
         db::get_review_pr(&conn, &body.repo, body.number, &user)
     };
 

@@ -54,6 +54,7 @@ pub struct ReviewPrRow {
     pub updated_at: String,
     pub ci_approval_needed: bool,
     pub base_sha: String,
+    pub is_mentioned: bool,
 }
 
 pub struct PrInsert {
@@ -114,7 +115,7 @@ pub struct IssueInsert {
     pub labels: String,
 }
 
-const CURRENT_VERSION: i64 = 18;
+const CURRENT_VERSION: i64 = 19;
 
 /// Each entry migrates from version (index) to version (index + 1).
 const MIGRATIONS: &[&str] = &[
@@ -328,6 +329,10 @@ const MIGRATIONS: &[&str] = &[
      ALTER TABLE review_prs ADD COLUMN base_sha TEXT NOT NULL DEFAULT ''",
     // 17 -> 18: head_sha for prs table (was already on review_prs)
     "ALTER TABLE prs ADD COLUMN head_sha TEXT NOT NULL DEFAULT ''",
+    // 18 -> 19: mention tracking on review_prs
+    "ALTER TABLE review_prs ADD COLUMN mention_count INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE review_prs ADD COLUMN last_mention_count INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE review_prs ADD COLUMN is_mentioned INTEGER NOT NULL DEFAULT 0",
 ];
 
 pub fn init_db(path: &Path) -> Connection {
@@ -621,9 +626,9 @@ pub fn list_review_prs(conn: &Connection, user: &str) -> Vec<ReviewPrRow> {
                 review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count, head_sha,
                 updated_at, ci_approval_needed,
-                checks_success, checks_fail, checks_pending, base_sha
+                checks_success, checks_fail, checks_pending, base_sha, is_mentioned
          FROM review_prs WHERE target_user = ?1
-         ORDER BY ci_approval_needed DESC, updated_at DESC",
+         ORDER BY is_mentioned DESC, ci_approval_needed DESC, updated_at DESC",
     ).unwrap();
     stmt.query_map(rusqlite::params![user], |row| {
         Ok(ReviewPrRow {
@@ -650,6 +655,7 @@ pub fn list_review_prs(conn: &Connection, user: &str) -> Vec<ReviewPrRow> {
             checks_fail: row.get(20)?,
             checks_pending: row.get(21)?,
             base_sha: row.get(22)?,
+            is_mentioned: row.get::<_, i64>(23)? != 0,
         })
     })
     .unwrap()
@@ -659,7 +665,8 @@ pub fn list_review_prs(conn: &Connection, user: &str) -> Vec<ReviewPrRow> {
 
 pub fn set_review_read(conn: &Connection, repo: &str, number: i64, read: bool, user: &str) {
     if read {
-        // Mark read and snapshot current values
+        // Mark read and snapshot current values. Also clear mention state
+        // and snapshot mention_count so future mentions are detected as new.
         conn.execute(
             "UPDATE review_prs SET is_read = 1,
                 read_comment_count = comment_count,
@@ -667,7 +674,9 @@ pub fn set_review_read(conn: &Connection, repo: &str, number: i64, read: bool, u
                 read_head_sha = head_sha,
                 read_title = title,
                 read_updated_at = updated_at,
-                read_drci_emoji = drci_emoji
+                read_drci_emoji = drci_emoji,
+                is_mentioned = 0,
+                last_mention_count = mention_count
              WHERE target_user = ?1 AND repo = ?2 AND number = ?3",
             rusqlite::params![user, repo, number],
         ).ok();
@@ -680,13 +689,34 @@ pub fn set_review_read(conn: &Connection, repo: &str, number: i64, read: bool, u
     }
 }
 
+pub fn set_review_mention(conn: &Connection, repo: &str, number: i64, mentioned: bool, user: &str) {
+    if mentioned {
+        // Manual on: just flip the bit. Don't touch last_mention_count so a
+        // subsequent dismiss + new mention can still auto-fire.
+        conn.execute(
+            "UPDATE review_prs SET is_mentioned = 1
+             WHERE target_user = ?1 AND repo = ?2 AND number = ?3",
+            rusqlite::params![user, repo, number],
+        ).ok();
+    } else {
+        // Manual off: snapshot the current mention_count so we only re-fire
+        // when more mentions arrive.
+        conn.execute(
+            "UPDATE review_prs SET is_mentioned = 0,
+                last_mention_count = mention_count
+             WHERE target_user = ?1 AND repo = ?2 AND number = ?3",
+            rusqlite::params![user, repo, number],
+        ).ok();
+    }
+}
+
 pub fn get_review_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> Option<ReviewPrRow> {
     conn.query_row(
         "SELECT repo, number, title, url, author, is_draft, head_ref_name, base_ref_name, is_read,
                 review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count, head_sha,
                 updated_at, ci_approval_needed,
-                checks_success, checks_fail, checks_pending, base_sha
+                checks_success, checks_fail, checks_pending, base_sha, is_mentioned
          FROM review_prs WHERE target_user = ?1 AND repo = ?2 AND number = ?3",
         rusqlite::params![user, repo, number],
         |row| {
@@ -714,6 +744,7 @@ pub fn get_review_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> 
                 checks_fail: row.get(20)?,
                 checks_pending: row.get(21)?,
                 base_sha: row.get(22)?,
+                is_mentioned: row.get::<_, i64>(23)? != 0,
             })
         },
     )
@@ -763,6 +794,7 @@ pub struct PrDetailUpdate {
     pub drci_emoji: String,
     pub drci_status: String,
     pub landing_status: String,
+    pub mention_count: i64,
 }
 
 pub fn update_pr_details(conn: &Connection, repo: &str, number: i64, user: &str, d: &PrDetailUpdate) {
@@ -786,12 +818,14 @@ pub fn update_review_pr_details(conn: &Connection, repo: &str, number: i64, user
         "UPDATE review_prs SET
             checks_success = ?1, checks_fail = ?2, checks_pending = ?3, checks_running = ?4,
             drci_emoji = ?5, drci_status = ?6,
+            mention_count = ?7,
+            is_mentioned = CASE WHEN ?7 > last_mention_count THEN 1 ELSE is_mentioned END,
             detail_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
             detail_for_updated_at = updated_at
-         WHERE target_user = ?7 AND repo = ?8 AND number = ?9",
+         WHERE target_user = ?8 AND repo = ?9 AND number = ?10",
         rusqlite::params![
             d.checks_success, d.checks_fail, d.checks_pending, d.checks_running as i64,
-            d.drci_emoji, d.drci_status,
+            d.drci_emoji, d.drci_status, d.mention_count,
             user, repo, number,
         ],
     ).ok();

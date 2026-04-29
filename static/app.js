@@ -238,6 +238,9 @@ function reviewCombinedPill(pr) {
   const revTip = reviewers.length === 0
     ? 'No reviews yet'
     : reviewers.map(r => r.login + ': ' + r.state).join('\n');
+  if (pr.is_mentioned) {
+    return `<span class="pill pill-mention" data-tip="${escapeHtml('You were mentioned in a comment')}"><span class="pill-dot"></span>Mention</span>`;
+  }
   if (pr.ci_approval_needed) {
     const tip = 'CI requires approval\n' + revTip;
     return `<span class="pill pill-red" data-tip="${escapeHtml(tip)}"><span class="spinner spinner-red"></span>CI Approval</span>`;
@@ -502,6 +505,8 @@ function renderReviews() {
     const rowClass = cls.length ? ` class="${cls.join(' ')}"` : '';
     const menuLabel = pr.is_read ? 'Mark unread' : 'Mark read';
     const menuRead = pr.is_read ? 'false' : 'true';
+    const mentionLabel = pr.is_mentioned ? 'Clear mention' : 'Mark mention';
+    const mentionVal = pr.is_mentioned ? 'false' : 'true';
     return `<tr${rowClass} data-key="${escapeHtml(prKey(pr))}">
       <td class="repo-cell"><span class="repo-text">${escapeHtml(pr.repo)}</span></td>
       <td class="mono"><a href="${escapeHtml(pr.url)}" target="_blank" onclick="markRead('${escapeHtml(pr.repo)}', ${pr.number})">#${pr.number}</a></td>
@@ -517,6 +522,7 @@ function renderReviews() {
         <div class="dropdown">
           <a href="${escapeHtml(pr.url)}" target="_blank" onclick="event.stopPropagation(); document.querySelectorAll('.dropdown.open').forEach(d => d.classList.remove('open'));">Open unread</a>
           <a href="#" onclick="setReviewRead(event, '${escapeHtml(pr.repo)}', ${pr.number}, ${menuRead})">${menuLabel}</a>
+          <a href="#" onclick="setReviewMention(event, '${escapeHtml(pr.repo)}', ${pr.number}, ${mentionVal})">${mentionLabel}</a>
         </div>
       </td>
     </tr>`;
@@ -682,6 +688,24 @@ function setReviewRead(e, repo, number, read) {
   const pr = allReviewPrs.find(p => prKey(p) === key);
   if (pr) {
     pr.is_read = read;
+    if (read) pr.is_mentioned = false;
+    renderReviews();
+  }
+}
+
+function setReviewMention(e, repo, number, mentioned) {
+  e.preventDefault();
+  e.stopPropagation();
+  document.querySelectorAll('.dropdown.open').forEach(d => d.classList.remove('open'));
+  fetch('/api/toggle-mention', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({user: currentUser, repo, number, mentioned}),
+  });
+  const key = repo + '#' + number;
+  const pr = allReviewPrs.find(p => prKey(p) === key);
+  if (pr) {
+    pr.is_mentioned = mentioned;
     renderReviews();
   }
 }
@@ -696,6 +720,7 @@ function markRead(repo, number) {
       body: JSON.stringify({user: currentUser, repo, number, read: true}),
     });
     pr.is_read = true;
+    pr.is_mentioned = false;
     renderReviews();
   }
 }

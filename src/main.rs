@@ -214,6 +214,7 @@ async fn main() -> std::io::Result<()> {
             .service(web::events)
             .service(web::api_toggle_hidden)
             .service(web::api_toggle_review_read)
+            .service(web::api_toggle_mention)
             .service(web::api_refresh)
             .service(web::api_set_user)
     })

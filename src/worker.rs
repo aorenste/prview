@@ -130,6 +130,12 @@ pub async fn fetch_details_loop(
 
         for user in &users {
             let label = if user.is_empty() { "@me" } else { user.as_str() };
+            // Resolve "@me" / empty to the authenticated user for mention matching.
+            let mention_user: String = if user.is_empty() {
+                github::cached_gh_user().unwrap_or("").to_string()
+            } else {
+                user.clone()
+            };
 
             // Collect PRs whose details haven't been fetched in the last 60s
             let (stale_prs, stale_reviews) = {
@@ -164,7 +170,7 @@ pub async fn fetch_details_loop(
                     let nums: Vec<i64> = chunk.iter().map(|(n, _)| *n).collect();
                     log!("[{}] Detail batch: {} {:?}", label, repo, nums);
 
-                    match github::fetch_pr_details_batch(repo, chunk).await {
+                    match github::fetch_pr_details_batch(repo, chunk, &mention_user).await {
                         Ok((results, needs_pagination)) => {
                             let mut pr_updates = Vec::new();
                             let mut review_updates = Vec::new();
@@ -203,7 +209,7 @@ pub async fn fetch_details_loop(
 
                             // Fall back to individual fetches for PRs needing pagination
                             for (number, include_landing) in &needs_pagination {
-                                if let Ok(details) = github::fetch_pr_details(repo, *number, *include_landing).await {
+                                if let Ok(details) = github::fetch_pr_details(repo, *number, *include_landing, &mention_user).await {
                                     let conn = db.lock().unwrap();
                                     if is_my_pr.contains(&(repo.clone(), *number)) {
                                         db::update_pr_details(&conn, repo, *number, user, &details);

@@ -257,6 +257,8 @@
   .pill-muted { background: var(--pill-muted-bg); color: var(--text-muted); }
   .pill-muted .pill-dot { background: var(--text-muted); }
   .pill-accent { background: var(--accent-bg); color: var(--accent); }
+  .pill-mention { background: var(--accent-bg); color: var(--accent); font-weight: 600; }
+  .pill-mention .pill-dot { background: var(--accent); }
 
   /* Label pills */
   .label-pill {
