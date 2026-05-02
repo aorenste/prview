@@ -396,28 +396,6 @@
     border-color: var(--accent);
   }
 
-  /* User toggle */
-  .user-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    margin-left: auto;
-  }
-  .user-input {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    color: var(--text);
-    font-family: inherit;
-    font-size: 0.85em;
-    padding: 5px 10px;
-    border-radius: 8px;
-    width: 130px;
-    outline: none;
-    transition: border-color 0.15s;
-  }
-  .user-input:focus { border-color: var(--accent); }
-  .user-input.active-user { border-color: var(--accent); color: var(--accent); }
-
   /* Recently Landed section */
   .landed-section {
     margin-top: 16px;

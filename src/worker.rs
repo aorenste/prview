@@ -54,41 +54,28 @@ pub async fn fetch_prs_loop(
     interval: std::time::Duration,
     tx: broadcast::Sender<UpdateBatch>,
     nudge: Arc<AtomicBool>,
-    active_users: Arc<Mutex<HashMap<String, usize>>>,
+    gh_user: Arc<String>,
 ) {
     loop {
         nudge.store(false, Ordering::Relaxed);
+        let user = gh_user.as_str();
 
-        let users: Vec<(String, usize)> = {
-            let map = active_users.lock().unwrap();
-            if map.is_empty() {
-                vec![(String::new(), 0)] // default to @me
-            } else {
-                map.iter().map(|(k, v)| (k.clone(), *v)).collect()
+        match fetch_and_store(&db, &tx, user).await {
+            Ok((my_count, review_count)) => {
+                log!("[{}] Fetched {} open PRs, {} review-requested PRs",
+                    user, my_count, review_count);
             }
-        };
-
-        for (user, _) in &users {
-            let label = if user.is_empty() { "@me" } else { user.as_str() };
-            match fetch_and_store(&db, &tx, user).await {
-                Ok((my_count, review_count)) => {
-                    let conns = active_users.lock().unwrap().get(user).copied().unwrap_or(0);
-                    log!("[{}] Fetched {} open PRs, {} review-requested PRs ({} conn{})",
-                        label, my_count, review_count, conns, if conns == 1 { "" } else { "s" });
-                }
-                Err(e) => {
-                    log!("[{}] Error fetching PRs: {}",
-                        label, e);
-                    let _ = tx.send(UpdateBatch {
-                        target_user: user.clone(),
-                        pr_updates: vec![],
-                        review_updates: vec![],
-                        merged_prs: vec![],
-                        issue_updates: vec![],
-                        hidden_count: 0,
-                        error: Some(e.to_string()),
-                    });
-                }
+            Err(e) => {
+                log!("[{}] Error fetching PRs: {}", user, e);
+                let _ = tx.send(UpdateBatch {
+                    target_user: user.to_string(),
+                    pr_updates: vec![],
+                    review_updates: vec![],
+                    merged_prs: vec![],
+                    issue_updates: vec![],
+                    hidden_count: 0,
+                    error: Some(e.to_string()),
+                });
             }
         }
 
@@ -116,27 +103,14 @@ pub async fn fetch_prs_loop(
 pub async fn fetch_details_loop(
     db: Arc<Mutex<Connection>>,
     tx: broadcast::Sender<UpdateBatch>,
-    active_users: Arc<Mutex<HashMap<String, usize>>>,
+    gh_user: Arc<String>,
 ) {
     loop {
-        let users: Vec<String> = {
-            let map = active_users.lock().unwrap();
-            if map.is_empty() {
-                vec![String::new()]
-            } else {
-                map.keys().cloned().collect()
-            }
-        };
+        let user = gh_user.as_str();
+        let label = user;
+        let mention_user = user;
 
-        for user in &users {
-            let label = if user.is_empty() { "@me" } else { user.as_str() };
-            // Resolve "@me" / empty to the authenticated user for mention matching.
-            let mention_user: String = if user.is_empty() {
-                github::cached_gh_user().unwrap_or("").to_string()
-            } else {
-                user.clone()
-            };
-
+        {
             // Collect PRs whose details haven't been fetched in the last 60s
             let (stale_prs, stale_reviews) = {
                 let conn = db.lock().unwrap();
@@ -197,7 +171,7 @@ pub async fn fetch_details_loop(
                                     db::hidden_count(&conn, user)
                                 };
                                 let _ = tx.send(UpdateBatch {
-                                    target_user: user.clone(),
+                                    target_user: user.to_string(),
                                     pr_updates,
                                     review_updates,
                                     merged_prs: vec![],
@@ -216,7 +190,7 @@ pub async fn fetch_details_loop(
                                         if let Some(pr) = db::get_pr(&conn, repo, *number, user) {
                                             let hidden_count = db::hidden_count(&conn, user);
                                             let _ = tx.send(UpdateBatch {
-                                                target_user: user.clone(),
+                                                target_user: user.to_string(),
                                                 pr_updates: vec![PrUpdate::Changed(pr)],
                                                 review_updates: vec![],
                                                 merged_prs: vec![],
@@ -231,7 +205,7 @@ pub async fn fetch_details_loop(
                                         if let Some(pr) = db::get_review_pr(&conn, repo, *number, user) {
                                             let hidden_count = db::hidden_count(&conn, user);
                                             let _ = tx.send(UpdateBatch {
-                                                target_user: user.clone(),
+                                                target_user: user.to_string(),
                                                 pr_updates: vec![],
                                                 review_updates: vec![ReviewPrUpdate::Changed(pr)],
                                                 merged_prs: vec![],

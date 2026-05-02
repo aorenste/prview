@@ -18,7 +18,6 @@ mod github;
 mod web;
 mod worker;
 
-use std::collections::HashMap;
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -157,31 +156,48 @@ async fn main() -> std::io::Result<()> {
     let conn = db::init_db(&db_path);
     let db = Arc::new(Mutex::new(conn));
 
+    // One-time data fixup: migrate any existing rows whose target_user is the
+    // legacy "" sentinel over to the actual gh_user. Idempotent — after the
+    // first run, no rows match.
+    {
+        let conn = db.lock().unwrap();
+        for table in ["prs", "review_prs", "merged_prs", "issues"] {
+            let sql = format!(
+                "UPDATE OR IGNORE {} SET target_user = ?1 WHERE target_user = ''",
+                table
+            );
+            let n = conn.execute(&sql, rusqlite::params![&gh_user]).unwrap_or(0);
+            if n > 0 {
+                log!("Migrated {} rows in {} from target_user='' to '{}'", n, table, gh_user);
+            }
+        }
+    }
+
     let (tx, _) = tokio::sync::broadcast::channel::<worker::UpdateBatch>(64);
 
     let build_hash = web::build_hash();
     log!("Build hash: {}", build_hash);
 
     let nudge = Arc::new(AtomicBool::new(false));
-    let active_users = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
+    let gh_user_arc = Arc::new(gh_user.clone());
 
     // Spawn background PR fetcher
     let db_clone = db.clone();
     let tx_clone = tx.clone();
     let nudge_clone = nudge.clone();
-    let active_users_clone = active_users.clone();
+    let gh_user_clone = gh_user_arc.clone();
     let interval = args.interval;
     log!("Refresh interval: {}", humantime::format_duration(interval));
     tokio::spawn(async move {
-        worker::fetch_prs_loop(db_clone, interval, tx_clone, nudge_clone, active_users_clone).await;
+        worker::fetch_prs_loop(db_clone, interval, tx_clone, nudge_clone, gh_user_clone).await;
     });
 
     // Spawn background detail fetcher
     let db_clone2 = db.clone();
     let tx_clone2 = tx.clone();
-    let active_users_clone2 = active_users.clone();
+    let gh_user_clone2 = gh_user_arc.clone();
     tokio::spawn(async move {
-        worker::fetch_details_loop(db_clone2, tx_clone2, active_users_clone2).await;
+        worker::fetch_details_loop(db_clone2, tx_clone2, gh_user_clone2).await;
     });
 
     let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
@@ -199,14 +215,14 @@ async fn main() -> std::io::Result<()> {
     let tx_data = actix_web::web::Data::new(tx);
     let hash_data = actix_web::web::Data::new(build_hash);
     let nudge_data = actix_web::web::Data::new(nudge);
-    let active_users_data = actix_web::web::Data::new(active_users);
+    let user_data = actix_web::web::Data::new(gh_user_arc);
     HttpServer::new(move || {
         App::new()
             .app_data(db_data.clone())
             .app_data(tx_data.clone())
             .app_data(hash_data.clone())
             .app_data(nudge_data.clone())
-            .app_data(active_users_data.clone())
+            .app_data(user_data.clone())
             .service(web::index)
             .service(web::icon)
             .service(web::static_css)
@@ -216,7 +232,6 @@ async fn main() -> std::io::Result<()> {
             .service(web::api_toggle_review_read)
             .service(web::api_toggle_mention)
             .service(web::api_refresh)
-            .service(web::api_set_user)
     })
     .listen_openssl(reuseaddr_listener(args.port)?, builder)?
     .run()

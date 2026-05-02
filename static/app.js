@@ -415,15 +415,17 @@ function toggleReviewsSort(col) {
 
 function renderReviews() {
   renderHeaders('reviews-thead', reviewsCols, reviewsSort, toggleReviewsSort);
+  // Mentions bypass every filter — even if a PR is a draft, approved, has
+  // changes requested, or is marked read, a mention forces it visible.
   let visible = allReviewPrs;
-  if (!showDrafts) visible = visible.filter(p => !p.is_draft);
-  if (!showApproved) visible = visible.filter(p => p.review_status !== 'APPROVED');
-  if (!showRejected) visible = visible.filter(p => p.review_status !== 'CHANGES_REQUESTED');
+  if (!showDrafts) visible = visible.filter(p => p.is_mentioned || !p.is_draft);
+  if (!showApproved) visible = visible.filter(p => p.is_mentioned || p.review_status !== 'APPROVED');
+  if (!showRejected) visible = visible.filter(p => p.is_mentioned || p.review_status !== 'CHANGES_REQUESTED');
 
   // Count read items before applying read filter (for tab badge and chip)
   const unreadCount = visible.filter(p => !p.is_read).length;
   const readCount = visible.length - unreadCount;
-  if (!showRead) visible = visible.filter(p => !p.is_read);
+  if (!showRead) visible = visible.filter(p => p.is_mentioned || !p.is_read);
 
   const tbody = document.getElementById('reviews-body');
   const bar = document.getElementById('reviews-filter-bar');
@@ -646,7 +648,7 @@ function toggleHidden(repo, number, hidden) {
   fetch('/api/toggle-hidden', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({user: currentUser, repo, number, hidden}),
+    body: JSON.stringify({repo, number, hidden}),
   });
   const key = repo + '#' + number;
   const pr = allPrs.find(p => prKey(p) === key);
@@ -695,7 +697,7 @@ function setReviewRead(e, repo, number, read) {
   fetch('/api/toggle-review-read', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({user: currentUser, repo, number, read}),
+    body: JSON.stringify({repo, number, read}),
   });
   const key = repo + '#' + number;
   const pr = allReviewPrs.find(p => prKey(p) === key);
@@ -713,7 +715,7 @@ function setReviewMention(e, repo, number, mentioned) {
   fetch('/api/toggle-mention', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({user: currentUser, repo, number, mentioned}),
+    body: JSON.stringify({repo, number, mentioned}),
   });
   const key = repo + '#' + number;
   const pr = allReviewPrs.find(p => prKey(p) === key);
@@ -730,49 +732,12 @@ function markRead(repo, number) {
     fetch('/api/toggle-review-read', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({user: currentUser, repo, number, read: true}),
+      body: JSON.stringify({repo, number, read: true}),
     });
     pr.is_read = true;
     pr.is_mentioned = false;
     renderReviews();
   }
-}
-
-let currentUser = '';
-
-// Cookie helpers
-function setCookie(name, val) {
-  document.cookie = name + '=' + encodeURIComponent(val) + ';path=/;max-age=31536000;SameSite=Lax';
-}
-function getCookie(name) {
-  const m = document.cookie.match('(?:^|; )' + name + '=([^;]*)');
-  return m ? decodeURIComponent(m[1]) : '';
-}
-
-function setUser(user) {
-  user = user.trim();
-  currentUser = user;
-  setCookie('prview_user', user);
-  const meBtn = document.getElementById('user-me-btn');
-  const input = document.getElementById('user-input');
-  if (user === '') {
-    meBtn.classList.add('active');
-    input.classList.remove('active-user');
-    input.value = '';
-  } else {
-    meBtn.classList.remove('active');
-    input.classList.add('active-user');
-    input.value = user;
-  }
-  allPrs = [];
-  allReviewPrs = [];
-  allMergedPrs = [];
-  allIssues = [];
-  hiddenCount = 0;
-  hasFetched = false;
-  renderAll();
-  fetch('/api/set-user', { method: 'POST' });
-  connectSSE();
 }
 
 function refreshNow() {
@@ -795,8 +760,7 @@ function checkBuildHash(hash) {
 
 function connectSSE() {
   if (evtSource) evtSource.close();
-  const params = currentUser ? '?user=' + encodeURIComponent(currentUser) : '';
-  evtSource = new EventSource('/api/events' + params);
+  evtSource = new EventSource('/api/events');
 
   evtSource.addEventListener('init', (e) => {
     document.getElementById('conn-error').style.display = 'none';
@@ -824,17 +788,6 @@ function connectSSE() {
   evtSource.onerror = () => {
     document.getElementById('conn-error').style.display = 'block';
   };
-}
-
-// Restore user from cookie
-const savedUser = getCookie('prview_user');
-if (savedUser) {
-  currentUser = savedUser;
-  const meBtn = document.getElementById('user-me-btn');
-  const input = document.getElementById('user-input');
-  meBtn.classList.remove('active');
-  input.classList.add('active-user');
-  input.value = savedUser;
 }
 
 connectSSE();

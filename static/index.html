@@ -15,12 +15,6 @@
   <h1>PRView</h1>
   <span class="badge">Live</span>
   <button id="refresh-btn" class="refresh-btn" onclick="refreshNow()" title="Refresh now">&#x21bb;</button>
-  <div class="user-toggle">
-    <button class="chip active" id="user-me-btn" onclick="setUser('')">me</button>
-    <input type="text" id="user-input" class="user-input" placeholder="username" spellcheck="false" autocomplete="off"
-           onfocus="this.select()"
-           onkeydown="if(event.key==='Enter'){setUser(this.value);this.blur();}">
-  </div>
 </div>
 <div class="tabs">
   <button class="tab active" data-tab="my-prs">My Open PRs <span class="tab-count" id="my-prs-count">0</span><span class="tab-count tab-count-dim" id="my-prs-draft-count" style="display:none"></span></button>

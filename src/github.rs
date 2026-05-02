@@ -10,15 +10,6 @@ type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 
 static CLIENT: OnceLock<(Client, String)> = OnceLock::new();
 
-/// Authenticated user's GitHub login. Populated by whoami(); read by code that
-/// needs to resolve "@me" / empty target_user to a real handle (e.g. mention
-/// detection in PR comments).
-static GH_USER: OnceLock<String> = OnceLock::new();
-
-/// Returns the authenticated user's login if whoami() has been called.
-pub fn cached_gh_user() -> Option<&'static str> {
-    GH_USER.get().map(|s| s.as_str())
-}
 
 /// Epoch second when rate limit backoff expires. 0 = not rate limited.
 static RATE_LIMITED_UNTIL: AtomicU64 = AtomicU64::new(0);
@@ -89,15 +80,13 @@ pub fn init_client(proxy: Option<&str>) {
 
 /// Query GitHub for the authenticated user. Call after init_client.
 pub async fn whoami() -> String {
-    let login = match rest_get("user").await {
+    match rest_get("user").await {
         Ok(body) => {
             let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
             v.get("login").and_then(|l| l.as_str()).unwrap_or("unknown").to_string()
         }
         Err(e) => format!("error: {}", e),
-    };
-    let _ = GH_USER.set(login.clone());
-    login
+    }
 }
 
 fn get_client() -> &'static (Client, String) {

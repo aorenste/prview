@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use actix_web::{HttpResponse, get, post, web};
@@ -12,7 +11,7 @@ use crate::worker::UpdateBatch;
 pub type Db = web::Data<Arc<Mutex<Connection>>>;
 pub type Tx = web::Data<broadcast::Sender<UpdateBatch>>;
 pub type Nudge = web::Data<Arc<std::sync::atomic::AtomicBool>>;
-pub type ActiveUsers = web::Data<Arc<Mutex<HashMap<String, usize>>>>;
+pub type User = web::Data<Arc<String>>;
 
 pub fn build_hash() -> String {
     use std::hash::{Hash, Hasher};
@@ -37,7 +36,6 @@ struct InitPayload {
 
 #[derive(Deserialize)]
 struct ToggleRequest {
-    user: Option<String>,
     repo: String,
     number: i64,
     hidden: bool,
@@ -45,7 +43,6 @@ struct ToggleRequest {
 
 #[derive(Deserialize)]
 struct ToggleReadRequest {
-    user: Option<String>,
     repo: String,
     number: i64,
     read: bool,
@@ -53,15 +50,9 @@ struct ToggleReadRequest {
 
 #[derive(Deserialize)]
 struct ToggleMentionRequest {
-    user: Option<String>,
     repo: String,
     number: i64,
     mentioned: bool,
-}
-
-#[derive(Deserialize)]
-struct UserQuery {
-    user: Option<String>,
 }
 
 const APP_ICON_SVG: &str = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect width='128' height='128' rx='24' fill='#0f172a'/><circle cx='40' cy='36' r='10' fill='none' stroke='#818cf8' stroke-width='7'/><line x1='40' y1='46' x2='40' y2='92' stroke='#818cf8' stroke-width='7' stroke-linecap='round'/><circle cx='88' cy='92' r='10' fill='none' stroke='#818cf8' stroke-width='7'/><line x1='88' y1='82' x2='88' y2='56' stroke='#818cf8' stroke-width='7' stroke-linecap='round'/><path d='M88 56 L76 48 M88 56 L76 64' fill='none' stroke='#818cf8' stroke-width='7' stroke-linecap='round' stroke-linejoin='round'/></svg>";
@@ -80,52 +71,14 @@ pub async fn icon() -> HttpResponse {
         .body(APP_ICON_SVG)
 }
 
-/// Drop guard that unregisters the user from active_users when the SSE stream is dropped.
-struct SseDropGuard {
-    user: String,
-    active_users: Arc<Mutex<HashMap<String, usize>>>,
-}
-
-impl Drop for SseDropGuard {
-    fn drop(&mut self) {
-        let mut map = self.active_users.lock().unwrap();
-        let label = if self.user.is_empty() { "@me" } else { &self.user };
-        if let Some(count) = map.get_mut(&self.user) {
-            *count -= 1;
-            if *count == 0 {
-                map.remove(&self.user);
-                log!("[{}] SSE disconnected (0 conns)", label);
-            } else {
-                log!("[{}] SSE disconnected ({} conn{})",
-                    label, count, if *count == 1 { "" } else { "s" });
-            }
-        }
-    }
-}
-
 #[get("/api/events")]
 pub async fn events(
     db: Db,
     tx: Tx,
     hash: BuildHash,
-    active_users: ActiveUsers,
-    query: web::Query<UserQuery>,
+    user: User,
 ) -> HttpResponse {
-    let user = query.user.clone().unwrap_or_default();
-
-    // Register this user so the worker fetches for them
-    {
-        let mut map = active_users.lock().unwrap();
-        let count = map.entry(user.clone()).or_insert(0);
-        *count += 1;
-        log!("[{}] SSE connected ({} conn{})",
-            if user.is_empty() { "@me" } else { &user }, count, if *count == 1 { "" } else { "s" });
-    }
-
-    let guard = Arc::new(SseDropGuard {
-        user: user.clone(),
-        active_users: active_users.clone().into_inner().as_ref().clone(),
-    });
+    let user = user.as_ref().as_ref().clone();
 
     let (init_data, mut rx) = {
         let conn = db.lock().unwrap();
@@ -140,8 +93,6 @@ pub async fn events(
 
     let stream_hash = hash.as_ref().clone();
     let stream = async_stream::stream! {
-        let _guard = guard; // prevent drop until stream ends
-
         // Send initial full state
         yield Ok::<_, actix_web::Error>(
             web::Bytes::from(format!("event: init\ndata: {}\n\n", init_data))
@@ -156,9 +107,6 @@ pub async fn events(
                 result = rx.recv() => {
                     match result {
                         Ok(batch) => {
-                            if batch.target_user != user {
-                                continue;
-                            }
                             if let Ok(mut json) = serde_json::to_value(&batch) {
                                 json["build_hash"] = serde_json::Value::String(stream_hash.clone());
                                 if let Ok(s) = serde_json::to_string(&json) {
@@ -187,8 +135,8 @@ pub async fn events(
 }
 
 #[post("/api/toggle-hidden")]
-pub async fn api_toggle_hidden(db: Db, tx: Tx, body: web::Json<ToggleRequest>) -> HttpResponse {
-    let user = body.user.clone().unwrap_or_default();
+pub async fn api_toggle_hidden(db: Db, tx: Tx, user: User, body: web::Json<ToggleRequest>) -> HttpResponse {
+    let user = user.as_ref().as_ref().clone();
     let hidden_val: i64 = if body.hidden { 1 } else { 0 };
     let pr = {
         let conn = db.lock().unwrap();
@@ -217,8 +165,8 @@ pub async fn api_toggle_hidden(db: Db, tx: Tx, body: web::Json<ToggleRequest>) -
 }
 
 #[post("/api/toggle-review-read")]
-pub async fn api_toggle_review_read(db: Db, tx: Tx, body: web::Json<ToggleReadRequest>) -> HttpResponse {
-    let user = body.user.clone().unwrap_or_default();
+pub async fn api_toggle_review_read(db: Db, tx: Tx, user: User, body: web::Json<ToggleReadRequest>) -> HttpResponse {
+    let user = user.as_ref().as_ref().clone();
     let review_pr = {
         let conn = db.lock().unwrap();
         db::set_review_read(&conn, &body.repo, body.number, body.read, &user);
@@ -246,8 +194,8 @@ pub async fn api_toggle_review_read(db: Db, tx: Tx, body: web::Json<ToggleReadRe
 }
 
 #[post("/api/toggle-mention")]
-pub async fn api_toggle_mention(db: Db, tx: Tx, body: web::Json<ToggleMentionRequest>) -> HttpResponse {
-    let user = body.user.clone().unwrap_or_default();
+pub async fn api_toggle_mention(db: Db, tx: Tx, user: User, body: web::Json<ToggleMentionRequest>) -> HttpResponse {
+    let user = user.as_ref().as_ref().clone();
     let review_pr = {
         let conn = db.lock().unwrap();
         db::set_review_mention(&conn, &body.repo, body.number, body.mentioned, &user);
@@ -276,15 +224,6 @@ pub async fn api_toggle_mention(db: Db, tx: Tx, body: web::Json<ToggleMentionReq
 
 #[post("/api/refresh")]
 pub async fn api_refresh(nudge: Nudge) -> HttpResponse {
-    nudge.store(true, std::sync::atomic::Ordering::Relaxed);
-    HttpResponse::Ok().json(serde_json::json!({"ok": true}))
-}
-
-#[post("/api/set-user")]
-pub async fn api_set_user(
-    nudge: Nudge,
-) -> HttpResponse {
-    // Just nudge — the SSE reconnect will register the user
     nudge.store(true, std::sync::atomic::Ordering::Relaxed);
     HttpResponse::Ok().json(serde_json::json!({"ok": true}))
 }
