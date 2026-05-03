@@ -42,13 +42,13 @@ let showRead = loadPref('showRead', false);
 // --- Sort state ---
 function loadSortPref(key, defaultCol, defaultDir) {
   try {
-    const v = getCookie('prview_sort_' + key);
+    const v = localStorage.getItem('prview.sort.' + key);
     if (v) { const [col, dir] = v.split(':'); return { col, dir }; }
   } catch {}
   return { col: defaultCol, dir: defaultDir };
 }
 function saveSortPref(key, col, dir) {
-  setCookie('prview_sort_' + key, col + ':' + dir);
+  try { localStorage.setItem('prview.sort.' + key, col + ':' + dir); } catch {}
 }
 
 let myPrsSort = loadSortPref('my', 'updated_at', 'desc');

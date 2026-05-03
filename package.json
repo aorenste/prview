@@ -1,0 +1,10 @@
+{
+  "name": "prview-frontend-tests",
+  "private": true,
+  "scripts": {
+    "test": "node --test 'static/*.test.js'"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.0"
+  }
+}
