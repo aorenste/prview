@@ -5,36 +5,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { JSDOM } = require('jsdom');
-const fs = require('node:fs');
-const path = require('node:path');
-
-function loadApp() {
-  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
-  const dom = new JSDOM(html, { runScripts: 'outside-only', pretendToBeVisual: true });
-  const win = dom.window;
-
-  // Stub the browser APIs app.js touches on load so the script can finish.
-  win.EventSource = class {
-    constructor() {}
-    addEventListener() {}
-    close() {}
-    set onerror(_) {}
-  };
-  win.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
-  win.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
-
-  // Capture any uncaught error from event handlers — jsdom routes those to
-  // window.onerror rather than letting them propagate out of click().
-  win.__errors = [];
-  win.addEventListener('error', (e) => {
-    win.__errors.push(e.error || new Error(e.message));
-  });
-
-  const js = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
-  win.eval(js);
-  return win;
-}
+const { loadApp } = require('./test_helpers');
 
 test('clicking a sortable column header marks it active', () => {
   const win = loadApp();

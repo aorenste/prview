@@ -450,7 +450,7 @@
     --col-status: 90px;
     --col-author: 100px;
     --col-comments: 80px;
-    --col-updated: 60px;
+    --col-updated: 95px;
     --col-menu: 40px;
   }
   th.col-checkbox { width: var(--col-checkbox); }
