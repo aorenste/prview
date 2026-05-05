@@ -544,9 +544,12 @@ pub struct FetchResult {
     pub review_prs: Vec<PrInsert>,
     pub merged_prs: Vec<MergedPrRow>,
     pub issues: Vec<IssueInsert>,
+    /// (repo, number) of ALL authored PRs that closed in the last 7 days —
+    /// including manually closed (not just merged/landed). Used to remove them
+    /// from the prs table. merged_prs is a subset used for the display list.
+    pub closed_authored: Vec<(String, i64)>,
     /// (repo, number) of PRs the user reviewed (but didn't author) that were
-    /// closed in the last 7 days. Used to remove them from review_prs since
-    /// merged_prs only covers authored PRs.
+    /// closed in the last 7 days. Used to remove them from review_prs.
     pub closed_reviewed: Vec<(String, i64)>,
 }
 
@@ -698,13 +701,17 @@ pub async fn fetch_all_prs(user: &str) -> Result<FetchResult, Box<dyn std::error
         "is:pr reviewed-by:{} -author:{} closed:>{}",
         user_filter, user_filter, seven_days_ago
     );
-    let (merged_prs, issues, closed_reviewed) = tokio::join!(
+    let (landed_result, issues, closed_reviewed) = tokio::join!(
         async {
             match run_query(&landed_query, LANDED_PR_FIELDS).await {
-                Ok(nodes) => convert_landed_prs(&nodes),
+                Ok(nodes) => {
+                    let merged = convert_landed_prs(&nodes);
+                    let all_closed = extract_all_closed(&nodes);
+                    (merged, all_closed)
+                }
                 Err(e) => {
                     log!("Warning: failed to fetch landed PRs: {}", e);
-                    vec![]
+                    (vec![], vec![])
                 }
             }
         },
@@ -730,11 +737,13 @@ pub async fn fetch_all_prs(user: &str) -> Result<FetchResult, Box<dyn std::error
         }
     );
 
+    let (merged_prs, closed_authored) = landed_result;
     Ok(FetchResult {
         my_prs: convert_prs(&my_nodes),
         review_prs,
         merged_prs,
         issues,
+        closed_authored,
         closed_reviewed,
     })
 }
@@ -752,6 +761,12 @@ pub fn days_to_ymd(days_since_epoch: i64) -> (i64, i64, i64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m as i64, d as i64)
+}
+
+fn extract_all_closed(nodes: &[GqlPr]) -> Vec<(String, i64)> {
+    nodes.iter()
+        .map(|pr| (pr.repository.name_with_owner.clone(), pr.number))
+        .collect()
 }
 
 fn convert_landed_prs(nodes: &[GqlPr]) -> Vec<MergedPrRow> {
@@ -1428,5 +1443,52 @@ mod tests {
             comment("@aorenste_other"),
         ];
         assert_eq!(count_mentions(&cs, "aorenste"), 0);
+    }
+
+    fn closed_pr(number: i64, merged: bool) -> GqlPr {
+        GqlPr {
+            number,
+            title: format!("PR #{}", number),
+            url: format!("https://github.com/pytorch/pytorch/pull/{}", number),
+            author: Some(GqlAuthor { login: "aorenste".to_string() }),
+            is_draft: false,
+            head_ref_name: String::new(),
+            base_ref_name: String::new(),
+            base_ref: None,
+            repository: GqlRepo { name_with_owner: "pytorch/pytorch".to_string() },
+            state: "CLOSED".to_string(),
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            updated_at: "2025-01-02T00:00:00Z".to_string(),
+            review_decision: None,
+            reviews: Default::default(),
+            commits: None,
+            comments: None,
+            merged_at: if merged { Some("2025-01-02T00:00:00Z".to_string()) } else { None },
+            closed_at: Some("2025-01-02T00:00:00Z".to_string()),
+            timeline_items: None,
+        }
+    }
+
+    #[test]
+    fn manually_closed_pr_excluded_from_landed_display() {
+        let nodes = vec![closed_pr(176170, false)];
+        let landed = convert_landed_prs(&nodes);
+        assert!(landed.is_empty(), "manually closed PRs should not appear in Recently Landed");
+    }
+
+    #[test]
+    fn merged_pr_appears_in_landed_display() {
+        let nodes = vec![closed_pr(100, true)];
+        let landed = convert_landed_prs(&nodes);
+        assert_eq!(landed.len(), 1);
+    }
+
+    #[test]
+    fn manually_closed_pr_included_in_deletion_set() {
+        let nodes = vec![closed_pr(176170, false), closed_pr(100, true)];
+        let deletion_set = extract_all_closed(&nodes);
+        assert_eq!(deletion_set.len(), 2, "all closed PRs should be in the deletion set");
+        assert!(deletion_set.iter().any(|(_, n)| *n == 176170),
+            "manually closed PR must be in the deletion set");
     }
 }

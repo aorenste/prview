@@ -304,12 +304,12 @@ async fn fetch_and_store(
         db::upsert_review_prs(&conn, &result.review_prs, user)?;
         let _ = db::upsert_issues(&conn, &result.issues, user);
 
-        // Affirmative closure signals: merged_prs (closed PRs the user
-        // authored) and closed_reviewed (closed PRs the user reviewed but
-        // didn't author). Either is grounds for removing from the open tables.
-        for pr in &result.merged_prs {
-            db::delete_pr(&conn, &pr.repo, pr.number, user);
-            db::delete_review_pr(&conn, &pr.repo, pr.number, user);
+        // Affirmative closure signals: closed_authored covers ALL authored PRs
+        // that closed (including manually closed, not just merged). Also
+        // closed_reviewed covers PRs the user reviewed but didn't author.
+        for (repo, number) in &result.closed_authored {
+            db::delete_pr(&conn, repo, *number, user);
+            db::delete_review_pr(&conn, repo, *number, user);
         }
         for (repo, number) in &result.closed_reviewed {
             db::delete_review_pr(&conn, repo, *number, user);
