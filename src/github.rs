@@ -647,6 +647,14 @@ fn convert_prs(nodes: &[GqlPr]) -> Vec<PrInsert> {
     }).collect()
 }
 
+/// Check a single PR's state via REST. Returns "open", "closed", or "unknown".
+pub async fn check_pr_state(repo: &str, number: i64) -> Result<String, BoxErr> {
+    let endpoint = format!("repos/{}/pulls/{}", repo, number);
+    let body = rest_get(&endpoint).await?;
+    let v: serde_json::Value = serde_json::from_slice(&body)?;
+    Ok(v.get("state").and_then(|s| s.as_str()).unwrap_or("unknown").to_string())
+}
+
 pub async fn check_ci_approval_needed(repo: &str, head_sha: &str) -> bool {
     if head_sha.is_empty() {
         return false;

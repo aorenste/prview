@@ -316,6 +316,34 @@ async fn fetch_and_store(
         }
     }
 
+    // For review_prs that disappeared from the open-PR search but weren't
+    // caught by any closed query (e.g. review-requested PRs where GitHub
+    // clears the request on close), verify state individually via REST.
+    {
+        let fetched_keys: HashSet<(String, i64)> = result.review_prs.iter()
+            .map(|pr| (pr.repo.clone(), pr.number))
+            .collect();
+        let closed_keys: HashSet<(String, i64)> = result.closed_authored.iter()
+            .chain(result.closed_reviewed.iter())
+            .cloned()
+            .collect();
+        let old_review_keys: HashSet<(String, i64)> = old_reviews.keys().cloned().collect();
+        let to_verify = review_prs_needing_verification(&old_review_keys, &fetched_keys, &closed_keys);
+        for (repo, number) in &to_verify {
+            match github::check_pr_state(repo, *number).await {
+                Ok(state) if state != "open" => {
+                    log!("[{}] Review PR {}/#{} is {}, removing", label, repo, number, state);
+                    let conn = db.lock().unwrap();
+                    db::delete_review_pr(&conn, repo, *number, user);
+                }
+                Ok(_) => {} // still open — search hiccup, leave it
+                Err(e) => {
+                    log!("[{}] Failed to check state of {}/#{}: {}", label, repo, number, e);
+                }
+            }
+        }
+    }
+
     // Compute diffs
     let new_prs: HashMap<(String, i64), db::PrRow> = {
         let conn = db.lock().unwrap();
@@ -422,4 +450,58 @@ async fn fetch_and_store(
     });
 
     Ok((my_count, review_count))
+}
+
+use std::collections::HashSet;
+
+/// Identify review_prs that were in the DB but missing from both the open-PR
+/// search results AND the closed-query results. These need an individual REST
+/// state check to decide whether to keep (search hiccup) or delete (truly
+/// closed). Returns (repo, number) pairs.
+fn review_prs_needing_verification(
+    old_review_keys: &HashSet<(String, i64)>,
+    fetched_keys: &HashSet<(String, i64)>,
+    closed_keys: &HashSet<(String, i64)>,
+) -> Vec<(String, i64)> {
+    old_review_keys.iter()
+        .filter(|k| !fetched_keys.contains(k) && !closed_keys.contains(k))
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(repo: &str, number: i64) -> (String, i64) {
+        (repo.to_string(), number)
+    }
+
+    #[test]
+    fn absent_and_not_in_closed_needs_verification() {
+        let old = HashSet::from([key("pytorch/pytorch", 182427)]);
+        let fetched = HashSet::new();
+        let closed = HashSet::new();
+        let missing = review_prs_needing_verification(&old, &fetched, &closed);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].1, 182427);
+    }
+
+    #[test]
+    fn absent_but_in_closed_already_handled() {
+        let old = HashSet::from([key("pytorch/pytorch", 100)]);
+        let fetched = HashSet::new();
+        let closed = HashSet::from([key("pytorch/pytorch", 100)]);
+        let missing = review_prs_needing_verification(&old, &fetched, &closed);
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn present_in_fetch_not_missing() {
+        let old = HashSet::from([key("pytorch/pytorch", 200)]);
+        let fetched = HashSet::from([key("pytorch/pytorch", 200)]);
+        let closed = HashSet::new();
+        let missing = review_prs_needing_verification(&old, &fetched, &closed);
+        assert!(missing.is_empty());
+    }
 }
