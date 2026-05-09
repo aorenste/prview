@@ -669,8 +669,10 @@ pub async fn check_ci_approval_needed(repo: &str, head_sha: &str) -> bool {
     }
 }
 
-pub async fn fetch_all_prs(user: &str) -> Result<FetchResult, Box<dyn std::error::Error + Send + Sync>> {
-    let user_filter = if user.is_empty() { "@me".to_string() } else { user.to_string() };
+pub async fn fetch_all_prs(_user: &str) -> Result<FetchResult, Box<dyn std::error::Error + Send + Sync>> {
+    // Always use @me — it's a first-class GitHub search keyword that reliably
+    // resolves to the token owner. Literal usernames can differ in edge cases.
+    let user_filter = "@me";
     let my_query = format!("is:pr is:open author:{}", user_filter);
     let review_query = format!("is:pr is:open review-requested:{}", user_filter);
     let reviewed_query = format!("is:pr is:open reviewed-by:{} -author:{}", user_filter, user_filter);
@@ -1088,7 +1090,7 @@ pub async fn fetch_pr_details(repo: &str, number: i64, include_landing: bool, me
         }
     }
 
-    let (success, fail, pending) = count_check_contexts(&all_context_nodes);
+    let (success, fail, pending, queued) = count_check_contexts(&all_context_nodes);
 
     // Extract DrCI from comments
     let (drci_emoji, drci_status) = extract_drci_from_detail_comments(&pr.comments.nodes);
@@ -1106,6 +1108,7 @@ pub async fn fetch_pr_details(repo: &str, number: i64, include_landing: bool, me
         checks_success: success,
         checks_fail: fail,
         checks_pending: pending,
+        checks_queued: queued,
         checks_running: pending > 0,
         drci_emoji,
         drci_status,
@@ -1220,12 +1223,17 @@ fn extract_comment_count(pr: &GqlPr) -> i64 {
     }
 }
 
-fn count_check_contexts(nodes: &[serde_json::Value]) -> (i64, i64, i64) {
-    let (mut success, mut fail, mut pending) = (0i64, 0i64, 0i64);
+fn count_check_contexts(nodes: &[serde_json::Value]) -> (i64, i64, i64, i64) {
+    // queued is a subset of pending: jobs that haven't started running yet.
+    let (mut success, mut fail, mut pending, mut queued) = (0i64, 0i64, 0i64, 0i64);
     for node in nodes {
         if let Some(conclusion) = node.get("conclusion") {
             if conclusion.is_null() {
                 pending += 1;
+                let status = node.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                if matches!(status, "QUEUED" | "WAITING" | "REQUESTED" | "PENDING") {
+                    queued += 1;
+                }
             } else {
                 match conclusion.as_str().unwrap_or("") {
                     "SUCCESS" | "NEUTRAL" | "SKIPPED" => success += 1,
@@ -1234,6 +1242,8 @@ fn count_check_contexts(nodes: &[serde_json::Value]) -> (i64, i64, i64) {
                 }
             }
         } else if let Some(state) = node.get("state").and_then(|s| s.as_str()) {
+            // StatusContext has no queued/running distinction, so all non-terminal
+            // states are counted as pending only.
             match state {
                 "SUCCESS" => success += 1,
                 "FAILURE" | "ERROR" => fail += 1,
@@ -1241,7 +1251,7 @@ fn count_check_contexts(nodes: &[serde_json::Value]) -> (i64, i64, i64) {
             }
         }
     }
-    (success, fail, pending)
+    (success, fail, pending, queued)
 }
 
 pub const DETAIL_BATCH_SIZE: usize = 8;
@@ -1337,7 +1347,7 @@ pub async fn fetch_pr_details_batch(
             continue;
         }
 
-        let (success, fail, pending) = count_check_contexts(&all_context_nodes);
+        let (success, fail, pending, queued) = count_check_contexts(&all_context_nodes);
         let (drci_emoji, drci_status) = extract_drci_from_detail_comments(&pr.comments.nodes);
         let include_landing = include_map.get(&num).copied().unwrap_or(false);
         let landing_status = if include_landing {
@@ -1351,6 +1361,7 @@ pub async fn fetch_pr_details_batch(
             checks_success: success,
             checks_fail: fail,
             checks_pending: pending,
+            checks_queued: queued,
             checks_running: pending > 0,
             drci_emoji,
             drci_status,

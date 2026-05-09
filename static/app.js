@@ -206,7 +206,8 @@ function checksOverallPill(pr) {
 function detailedCIPill(pr) {
   const total = (pr.checks_success || 0) + (pr.checks_fail || 0) + (pr.checks_pending || 0);
   if (total === 0) return checksOverallPill(pr);
-  const tip = `${pr.checks_success} passed, ${pr.checks_fail} failed, ${pr.checks_pending} pending`;
+  const queuedSuffix = pr.checks_queued > 0 ? ` (${pr.checks_queued} queued)` : '';
+  const tip = `${pr.checks_success} passed, ${pr.checks_fail} failed, ${pr.checks_pending} pending${queuedSuffix}`;
   if (pr.checks_fail > 0) {
     const dot = pr.checks_running
       ? '<span class="spinner spinner-red"></span>'
@@ -220,8 +221,9 @@ function detailedCIPill(pr) {
 
 function ciOrLandingPill(pr) {
   const total = (pr.checks_success || 0) + (pr.checks_fail || 0) + (pr.checks_pending || 0);
+  const queuedSuffix = pr.checks_queued > 0 ? ` (${pr.checks_queued} queued)` : '';
   const tip = total > 0
-    ? escapeHtml(`${pr.checks_success} passed, ${pr.checks_fail} failed, ${pr.checks_pending} pending`)
+    ? escapeHtml(`${pr.checks_success} passed, ${pr.checks_fail} failed, ${pr.checks_pending} pending${queuedSuffix}`)
     : '';
   if (pr.landing_status === 'landing')
     return `<span class="pill pill-yellow" data-tip="${tip}"><span class="spinner"></span>Landing</span>`;

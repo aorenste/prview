@@ -21,6 +21,7 @@ pub struct PrRow {
     pub checks_success: i64,
     pub checks_fail: i64,
     pub checks_pending: i64,
+    pub checks_queued: i64,
     pub drci_status: String,
     pub drci_emoji: String,
     pub comment_count: i64,
@@ -47,6 +48,7 @@ pub struct ReviewPrRow {
     pub checks_success: i64,
     pub checks_fail: i64,
     pub checks_pending: i64,
+    pub checks_queued: i64,
     pub drci_status: String,
     pub drci_emoji: String,
     pub comment_count: i64,
@@ -115,7 +117,7 @@ pub struct IssueInsert {
     pub labels: String,
 }
 
-const CURRENT_VERSION: i64 = 19;
+const CURRENT_VERSION: i64 = 20;
 
 /// Each entry migrates from version (index) to version (index + 1).
 const MIGRATIONS: &[&str] = &[
@@ -333,6 +335,9 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE review_prs ADD COLUMN mention_count INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE review_prs ADD COLUMN last_mention_count INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE review_prs ADD COLUMN is_mentioned INTEGER NOT NULL DEFAULT 0",
+    // 19 -> 20: track queued check count (subset of checks_pending)
+    "ALTER TABLE prs ADD COLUMN checks_queued INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE review_prs ADD COLUMN checks_queued INTEGER NOT NULL DEFAULT 0",
 ];
 
 pub fn init_db(path: &Path) -> Connection {
@@ -451,13 +456,15 @@ pub fn list_prs(conn: &Connection, show_hidden: bool, user: &str) -> Vec<PrRow> 
         "SELECT repo, number, title, url, updated_at, hidden, is_draft, head_ref_name, base_ref_name,
                 review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count,
-                checks_success, checks_fail, checks_pending, landing_status, head_sha, base_sha
+                checks_success, checks_fail, checks_pending, landing_status, head_sha, base_sha,
+                checks_queued
          FROM prs WHERE target_user = ?1 ORDER BY updated_at DESC"
     } else {
         "SELECT repo, number, title, url, updated_at, hidden, is_draft, head_ref_name, base_ref_name,
                 review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count,
-                checks_success, checks_fail, checks_pending, landing_status, head_sha, base_sha
+                checks_success, checks_fail, checks_pending, landing_status, head_sha, base_sha,
+                checks_queued
          FROM prs WHERE target_user = ?1 AND hidden = 0 ORDER BY updated_at DESC"
     };
     let mut stmt = conn.prepare(sql).unwrap();
@@ -485,6 +492,7 @@ pub fn list_prs(conn: &Connection, show_hidden: bool, user: &str) -> Vec<PrRow> 
             landing_status: row.get(19)?,
             head_sha: row.get(20)?,
             base_sha: row.get(21)?,
+            checks_queued: row.get(22)?,
         })
     })
     .unwrap()
@@ -497,7 +505,8 @@ pub fn get_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> Option<
         "SELECT repo, number, title, url, updated_at, hidden, is_draft, head_ref_name, base_ref_name,
                 review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count,
-                checks_success, checks_fail, checks_pending, landing_status, head_sha, base_sha
+                checks_success, checks_fail, checks_pending, landing_status, head_sha, base_sha,
+                checks_queued
          FROM prs WHERE target_user = ?1 AND repo = ?2 AND number = ?3",
         rusqlite::params![user, repo, number],
         |row| {
@@ -524,6 +533,7 @@ pub fn get_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> Option<
                 landing_status: row.get(19)?,
                 head_sha: row.get(20)?,
                 base_sha: row.get(21)?,
+                checks_queued: row.get(22)?,
             })
         },
     )
@@ -626,7 +636,8 @@ pub fn list_review_prs(conn: &Connection, user: &str) -> Vec<ReviewPrRow> {
                 review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count, head_sha,
                 updated_at, ci_approval_needed,
-                checks_success, checks_fail, checks_pending, base_sha, is_mentioned
+                checks_success, checks_fail, checks_pending, base_sha, is_mentioned,
+                checks_queued
          FROM review_prs WHERE target_user = ?1
          ORDER BY is_mentioned DESC, ci_approval_needed DESC, updated_at DESC",
     ).unwrap();
@@ -656,6 +667,7 @@ pub fn list_review_prs(conn: &Connection, user: &str) -> Vec<ReviewPrRow> {
             checks_pending: row.get(21)?,
             base_sha: row.get(22)?,
             is_mentioned: row.get::<_, i64>(23)? != 0,
+            checks_queued: row.get(24)?,
         })
     })
     .unwrap()
@@ -716,7 +728,8 @@ pub fn get_review_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> 
                 review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count, head_sha,
                 updated_at, ci_approval_needed,
-                checks_success, checks_fail, checks_pending, base_sha, is_mentioned
+                checks_success, checks_fail, checks_pending, base_sha, is_mentioned,
+                checks_queued
          FROM review_prs WHERE target_user = ?1 AND repo = ?2 AND number = ?3",
         rusqlite::params![user, repo, number],
         |row| {
@@ -745,6 +758,7 @@ pub fn get_review_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> 
                 checks_pending: row.get(21)?,
                 base_sha: row.get(22)?,
                 is_mentioned: row.get::<_, i64>(23)? != 0,
+                checks_queued: row.get(24)?,
             })
         },
     )
@@ -790,6 +804,7 @@ pub struct PrDetailUpdate {
     pub checks_success: i64,
     pub checks_fail: i64,
     pub checks_pending: i64,
+    pub checks_queued: i64,
     pub checks_running: bool,
     pub drci_emoji: String,
     pub drci_status: String,
@@ -802,12 +817,14 @@ pub fn update_pr_details(conn: &Connection, repo: &str, number: i64, user: &str,
         "UPDATE prs SET
             checks_success = ?1, checks_fail = ?2, checks_pending = ?3, checks_running = ?4,
             drci_emoji = ?5, drci_status = ?6, landing_status = ?7,
+            checks_queued = ?8,
             detail_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
             detail_for_updated_at = updated_at
-         WHERE target_user = ?8 AND repo = ?9 AND number = ?10",
+         WHERE target_user = ?9 AND repo = ?10 AND number = ?11",
         rusqlite::params![
             d.checks_success, d.checks_fail, d.checks_pending, d.checks_running as i64,
             d.drci_emoji, d.drci_status, d.landing_status,
+            d.checks_queued,
             user, repo, number,
         ],
     ).ok();
@@ -820,12 +837,14 @@ pub fn update_review_pr_details(conn: &Connection, repo: &str, number: i64, user
             drci_emoji = ?5, drci_status = ?6,
             mention_count = ?7,
             is_mentioned = CASE WHEN ?7 > last_mention_count THEN 1 ELSE is_mentioned END,
+            checks_queued = ?8,
             detail_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
             detail_for_updated_at = updated_at
-         WHERE target_user = ?8 AND repo = ?9 AND number = ?10",
+         WHERE target_user = ?9 AND repo = ?10 AND number = ?11",
         rusqlite::params![
             d.checks_success, d.checks_fail, d.checks_pending, d.checks_running as i64,
             d.drci_emoji, d.drci_status, d.mention_count,
+            d.checks_queued,
             user, repo, number,
         ],
     ).ok();
