@@ -688,6 +688,24 @@ function toggleMenu(e) {
   }
 }
 
+// Cmd/Ctrl-click on a link: open in a background tab and keep focus here.
+// Browsers usually do this natively for target="_blank" + cmd-click, but some
+// window/extension setups still raise the new tab — forcing the refocus makes
+// the no-focus-shift behavior reliable.
+document.addEventListener('click', (e) => {
+  if (!(e.metaKey || e.ctrlKey) || e.button !== 0) return;
+  const a = e.target.closest('a[href]');
+  if (!a) return;
+  const href = a.getAttribute('href');
+  if (!href || href === '#') return;
+  e.preventDefault();
+  const w = window.open(a.href, '_blank', 'noopener');
+  if (w) {
+    w.blur();
+    window.focus();
+  }
+}, true);
+
 document.addEventListener('click', closeAllMenus);
 window.addEventListener('scroll', closeAllMenus, true);
 window.addEventListener('resize', closeAllMenus);

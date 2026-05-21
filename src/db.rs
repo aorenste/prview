@@ -607,8 +607,21 @@ pub fn upsert_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Res
     //    Guarded on updated_at so API-level jitter doesn't cause spurious unreads.
     // 2. DrCI transitioned to passing (regardless of updated_at), since the
     //    reviewer cares that CI is now green even if the PR wasn't otherwise touched.
-    conn.execute_batch(
-        "UPDATE review_prs SET is_read = 0
+    auto_unread_with_logging(conn, user)?;
+
+    Ok(())
+}
+
+fn auto_unread_with_logging(conn: &Connection, user: &str) -> Result<(), rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT target_user, repo, number,
+                updated_at, read_updated_at,
+                comment_count, read_comment_count,
+                review_status, read_review_status,
+                head_sha, read_head_sha,
+                title, read_title,
+                drci_emoji, read_drci_emoji
+         FROM review_prs
          WHERE is_read = 1 AND (
             (updated_at != read_updated_at AND (
                 comment_count != read_comment_count
@@ -619,7 +632,74 @@ pub fn upsert_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Res
             OR (drci_emoji = 'white_check_mark' AND read_drci_emoji != 'white_check_mark' AND read_drci_emoji != '')
          )"
     )?;
+    let rows: Vec<(String, String, i64, String)> = stmt.query_map([], |row| {
+        let tu: String = row.get(0)?;
+        let repo: String = row.get(1)?;
+        let number: i64 = row.get(2)?;
+        let updated_at: String = row.get(3)?;
+        let read_updated_at: String = row.get(4)?;
+        let comment_count: i64 = row.get(5)?;
+        let read_comment_count: i64 = row.get(6)?;
+        let review_status: String = row.get(7)?;
+        let read_review_status: String = row.get(8)?;
+        let head_sha: String = row.get(9)?;
+        let read_head_sha: String = row.get(10)?;
+        let title: String = row.get(11)?;
+        let read_title: String = row.get(12)?;
+        let drci_emoji: String = row.get(13)?;
+        let read_drci_emoji: String = row.get(14)?;
 
+        let short = |s: &str| s.chars().take(7).collect::<String>();
+        let mut reasons: Vec<String> = Vec::new();
+        if updated_at != read_updated_at {
+            if comment_count != read_comment_count {
+                reasons.push(format!("comment_count {}->{}", read_comment_count, comment_count));
+            }
+            if review_status != read_review_status {
+                reasons.push(format!("review_status {:?}->{:?}", read_review_status, review_status));
+            }
+            if head_sha != read_head_sha {
+                reasons.push(format!("head_sha {}->{}", short(&read_head_sha), short(&head_sha)));
+            }
+            if title != read_title {
+                reasons.push(format!("title {:?}->{:?}", read_title, title));
+            }
+            if !reasons.is_empty() {
+                reasons.insert(0, format!("updated_at {:?}->{:?}", read_updated_at, updated_at));
+            }
+        }
+        if drci_emoji == "white_check_mark"
+            && read_drci_emoji != "white_check_mark"
+            && !read_drci_emoji.is_empty()
+        {
+            reasons.push(format!("drci {:?}->white_check_mark", read_drci_emoji));
+        }
+        Ok((tu, repo, number, reasons.join(", ")))
+    })?
+    .filter_map(|r| r.ok())
+    .collect();
+
+    for (tu, repo, number, reason) in &rows {
+        log!(
+            "[{}] Auto-unread {}/#{} (upsert by [{}]): {}",
+            tu, repo, number, user, reason
+        );
+    }
+
+    if !rows.is_empty() {
+        conn.execute_batch(
+            "UPDATE review_prs SET is_read = 0
+             WHERE is_read = 1 AND (
+                (updated_at != read_updated_at AND (
+                    comment_count != read_comment_count
+                    OR review_status != read_review_status
+                    OR head_sha != read_head_sha
+                    OR title != read_title
+                ))
+                OR (drci_emoji = 'white_check_mark' AND read_drci_emoji != 'white_check_mark' AND read_drci_emoji != '')
+             )"
+        )?;
+    }
     Ok(())
 }
 
