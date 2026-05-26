@@ -38,6 +38,7 @@ let showDrafts = loadPref('showDrafts', false);
 let showApproved = loadPref('showApproved', false);
 let showRejected = loadPref('showRejected', false);
 let showRead = loadPref('showRead', false);
+let showPassing = loadPref('showPassing', false);
 
 // --- Sort state ---
 function loadSortPref(key, defaultCol, defaultDir) {
@@ -429,12 +430,24 @@ function renderReviews() {
   const readCount = visible.length - unreadCount;
   if (!showRead) visible = visible.filter(p => p.is_mentioned || !p.is_read);
 
+  // "Only show passing" filter: when on, hide PRs whose DrCI is failing or running.
+  // Everything else (passing, empty, awaiting-approval, other unknowns) is kept.
+  // Mentions bypass.
+  if (showPassing) {
+    visible = visible.filter(p =>
+      p.is_mentioned || (p.drci_emoji !== 'x' && p.drci_emoji !== 'hourglass_flowing_sand')
+    );
+  }
+
   const tbody = document.getElementById('reviews-body');
   const bar = document.getElementById('reviews-filter-bar');
 
   const draftCount = allReviewPrs.filter(p => p.is_draft).length;
   const approvedCount = allReviewPrs.filter(p => p.review_status === 'APPROVED').length;
   const rejectedCount = allReviewPrs.filter(p => p.review_status === 'CHANGES_REQUESTED').length;
+  const nonPassingCount = allReviewPrs.filter(p =>
+    p.drci_emoji === 'x' || p.drci_emoji === 'hourglass_flowing_sand'
+  ).length;
 
   let chips = [];
   if (draftCount > 0) {
@@ -452,6 +465,10 @@ function renderReviews() {
   if (readCount > 0) {
     chips.push(`<button class="chip${showRead ? ' active' : ''}" id="read-toggle">
       ${showRead ? 'Showing' : 'Show'} ${readCount} read</button>`);
+  }
+  if (nonPassingCount > 0 || showPassing) {
+    chips.push(`<button class="chip${showPassing ? ' active' : ''}" id="passing-toggle">
+      ${showPassing ? 'Only showing' : 'Only show'} passing</button>`);
   }
   bar.innerHTML = chips.join('');
 
@@ -480,6 +497,13 @@ function renderReviews() {
     document.getElementById('read-toggle').onclick = () => {
       showRead = !showRead;
       savePref('showRead', showRead);
+      renderReviews();
+    };
+  }
+  if (nonPassingCount > 0 || showPassing) {
+    document.getElementById('passing-toggle').onclick = () => {
+      showPassing = !showPassing;
+      savePref('showPassing', showPassing);
       renderReviews();
     };
   }
