@@ -874,8 +874,11 @@ fn extract_drci(pr: &GqlPr) -> (String, String) {
                 if line.starts_with("## :") && !line.contains("Helpful Links") && !line.contains("Active SEV") {
                     if let Some(rest) = line.strip_prefix("## :") {
                         if let Some(colon_pos) = rest.find(':') {
-                            let emoji = rest[..colon_pos].to_string();
+                            let mut emoji = rest[..colon_pos].to_string();
                             let status = rest[colon_pos + 1..].trim().to_string();
+                            if status.starts_with("You can merge normally") {
+                                emoji = "white_check_mark".to_string();
+                            }
                             return (emoji, status);
                         }
                     }
@@ -1162,8 +1165,11 @@ fn extract_drci_from_detail_comments(comments: &[DetailComment]) -> (String, Str
             if line.starts_with("## :") && !line.contains("Helpful Links") && !line.contains("Active SEV") {
                 if let Some(rest) = line.strip_prefix("## :") {
                     if let Some(colon_pos) = rest.find(':') {
-                        let emoji = rest[..colon_pos].to_string();
+                        let mut emoji = rest[..colon_pos].to_string();
                         let status = rest[colon_pos + 1..].trim().to_string();
+                        if status.starts_with("You can merge normally") {
+                            emoji = "white_check_mark".to_string();
+                        }
                         return (emoji, status);
                     }
                 }
