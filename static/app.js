@@ -416,6 +416,17 @@ function toggleReviewsSort(col) {
   renderReviews();
 }
 
+// Matches the green/Passing branch of detailedCIPill: no failures, no pending,
+// and no DrCI failing/running signal.
+function isCiPassing(pr) {
+  if (pr.drci_emoji === 'x' || pr.drci_emoji === 'hourglass_flowing_sand') return false;
+  if ((pr.checks_fail || 0) > 0) return false;
+  if ((pr.checks_pending || 0) > 0) return false;
+  const total = (pr.checks_success || 0) + (pr.checks_fail || 0) + (pr.checks_pending || 0);
+  if (total === 0 && pr.checks_overall && pr.checks_overall !== 'SUCCESS') return false;
+  return true;
+}
+
 function renderReviews() {
   renderHeaders('reviews-thead', reviewsCols, reviewsSort, toggleReviewsSort);
   // Mentions bypass every filter — even if a PR is a draft, approved, has
@@ -424,20 +435,12 @@ function renderReviews() {
   if (!showDrafts) visible = visible.filter(p => p.is_mentioned || !p.is_draft);
   if (!showApproved) visible = visible.filter(p => p.is_mentioned || p.review_status !== 'APPROVED');
   if (!showRejected) visible = visible.filter(p => p.is_mentioned || p.review_status !== 'CHANGES_REQUESTED');
+  if (showPassing) visible = visible.filter(p => p.is_mentioned || isCiPassing(p));
 
   // Count read items before applying read filter (for tab badge and chip)
   const unreadCount = visible.filter(p => !p.is_read).length;
   const readCount = visible.length - unreadCount;
   if (!showRead) visible = visible.filter(p => p.is_mentioned || !p.is_read);
-
-  // "Only show passing" filter: when on, hide PRs whose DrCI is failing or running.
-  // Everything else (passing, empty, awaiting-approval, other unknowns) is kept.
-  // Mentions bypass.
-  if (showPassing) {
-    visible = visible.filter(p =>
-      p.is_mentioned || (p.drci_emoji !== 'x' && p.drci_emoji !== 'hourglass_flowing_sand')
-    );
-  }
 
   const tbody = document.getElementById('reviews-body');
   const bar = document.getElementById('reviews-filter-bar');
@@ -445,9 +448,7 @@ function renderReviews() {
   const draftCount = allReviewPrs.filter(p => p.is_draft).length;
   const approvedCount = allReviewPrs.filter(p => p.review_status === 'APPROVED').length;
   const rejectedCount = allReviewPrs.filter(p => p.review_status === 'CHANGES_REQUESTED').length;
-  const nonPassingCount = allReviewPrs.filter(p =>
-    p.drci_emoji === 'x' || p.drci_emoji === 'hourglass_flowing_sand'
-  ).length;
+  const nonPassingCount = allReviewPrs.filter(p => !isCiPassing(p)).length;
 
   let chips = [];
   if (draftCount > 0) {
