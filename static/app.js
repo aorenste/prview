@@ -416,15 +416,10 @@ function toggleReviewsSort(col) {
   renderReviews();
 }
 
-// Matches the green/Passing branch of detailedCIPill: no failures, no pending,
-// and no DrCI failing/running signal.
 function isCiPassing(pr) {
-  if (pr.drci_emoji === 'x' || pr.drci_emoji === 'hourglass_flowing_sand') return false;
-  if ((pr.checks_fail || 0) > 0) return false;
-  if ((pr.checks_pending || 0) > 0) return false;
-  const total = (pr.checks_success || 0) + (pr.checks_fail || 0) + (pr.checks_pending || 0);
-  if (total === 0 && pr.checks_overall && pr.checks_overall !== 'SUCCESS') return false;
-  return true;
+  // DrCI-based: only hide PRs DrCI marks as failing or running. Empty DrCI
+  // (not yet reported) and unknown emojis stay visible.
+  return pr.drci_emoji !== 'x' && pr.drci_emoji !== 'hourglass_flowing_sand';
 }
 
 function renderReviews() {
