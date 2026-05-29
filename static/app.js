@@ -250,6 +250,10 @@ function reviewCombinedPill(pr) {
   }
   if (pr.is_draft)
     return `<span class="pill pill-muted" data-tip="${escapeHtml('Draft PR\n' + revTip)}">Draft</span>`;
+  if (pr.re_review_requested) {
+    const tip = 'Your review was re-requested\n' + revTip;
+    return `<span class="pill pill-mention" data-tip="${escapeHtml(tip)}"><span class="pill-dot"></span>Re-review</span>`;
+  }
   const tip = revTip;
   if (pr.review_status === 'CHANGES_REQUESTED')
     return `<span class="pill pill-red" data-tip="${escapeHtml(tip)}"><span class="pill-dot"></span>Changes</span>`;
@@ -426,10 +430,14 @@ function renderReviews() {
   renderHeaders('reviews-thead', reviewsCols, reviewsSort, toggleReviewsSort);
   // Mentions bypass every filter — even if a PR is a draft, approved, has
   // changes requested, or is marked read, a mention forces it visible.
+  // A pending re-review request likewise keeps the PR visible past the
+  // draft/approved/changes-requested hides, since the ball is in your court
+  // (e.g. a stale CHANGES_REQUESTED still drives GitHub's reviewDecision).
+  const stays = p => p.is_mentioned || p.re_review_requested;
   let visible = allReviewPrs;
-  if (!showDrafts) visible = visible.filter(p => p.is_mentioned || !p.is_draft);
-  if (!showApproved) visible = visible.filter(p => p.is_mentioned || p.review_status !== 'APPROVED');
-  if (!showRejected) visible = visible.filter(p => p.is_mentioned || p.review_status !== 'CHANGES_REQUESTED');
+  if (!showDrafts) visible = visible.filter(p => stays(p) || !p.is_draft);
+  if (!showApproved) visible = visible.filter(p => stays(p) || p.review_status !== 'APPROVED');
+  if (!showRejected) visible = visible.filter(p => stays(p) || p.review_status !== 'CHANGES_REQUESTED');
   if (showPassing) visible = visible.filter(p => p.is_mentioned || isCiPassing(p));
 
   // Count read items before applying read filter (for tab badge and chip)

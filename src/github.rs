@@ -241,6 +241,7 @@ const REVIEW_PR_FIELDS: &str = "
   repository { nameWithOwner }
   state createdAt updatedAt reviewDecision
   reviews(first: 20) { nodes { author { login } state } }
+  reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } } } }
   commits(last: 1) { nodes { commit {
     oid
     statusCheckRollup { state }
@@ -310,6 +311,8 @@ struct GqlPr {
     review_decision: Option<String>,
     #[serde(default)]
     reviews: GqlNodes<GqlReview>,
+    #[serde(default, rename = "reviewRequests")]
+    review_requests: GqlNodes<GqlReviewRequest>,
     commits: Option<GqlNodes<GqlCommitNode>>,
     comments: Option<GqlNodes<GqlComment>>,
     #[serde(default, rename = "mergedAt")]
@@ -355,6 +358,19 @@ struct GqlRef {
 struct GqlReview {
     author: GqlAuthor,
     state: String,
+}
+
+#[derive(Deserialize)]
+struct GqlReviewRequest {
+    #[serde(default, rename = "requestedReviewer")]
+    requested_reviewer: Option<GqlRequestedReviewer>,
+}
+
+#[derive(Deserialize)]
+struct GqlRequestedReviewer {
+    // Only present for User reviewers; absent for Team/Mannequin requests.
+    #[serde(default)]
+    login: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -615,7 +631,7 @@ async fn run_query(search_filter: &str, fields: &str) -> Result<Vec<GqlPr>, Box<
     Ok(all_nodes)
 }
 
-fn convert_prs(nodes: &[GqlPr]) -> Vec<PrInsert> {
+fn convert_prs(nodes: &[GqlPr], user: &str) -> Vec<PrInsert> {
     nodes.iter().map(|pr| {
         let (review_status, reviewers) = extract_reviews(pr);
         let (drci_emoji, drci_status) = extract_drci(pr);
@@ -643,8 +659,24 @@ fn convert_prs(nodes: &[GqlPr]) -> Vec<PrInsert> {
             head_sha: extract_head_sha(pr),
             base_sha: extract_base_sha(pr),
             ci_approval_needed: false,
+            re_review_requested: extract_re_review_requested(pr, user),
         }
     }).collect()
+}
+
+/// True if `user` is in the PR's pending review-request list. GitHub keeps a
+/// requested reviewer here until they submit a fresh review, even when their
+/// previous review still drives reviewDecision (e.g. a stale CHANGES_REQUESTED).
+fn extract_re_review_requested(pr: &GqlPr, user: &str) -> bool {
+    if user.is_empty() {
+        return false;
+    }
+    pr.review_requests.nodes.iter().any(|req| {
+        req.requested_reviewer
+            .as_ref()
+            .and_then(|r| r.login.as_deref())
+            .is_some_and(|login| login.eq_ignore_ascii_case(user))
+    })
 }
 
 /// Check a single PR's state via REST. Returns "open", "closed", or "unknown".
@@ -692,7 +724,7 @@ pub async fn fetch_all_prs(_user: &str) -> Result<FetchResult, Box<dyn std::erro
         }
     }
 
-    let review_prs = convert_prs(&all_review_nodes);
+    let review_prs = convert_prs(&all_review_nodes, _user);
 
     // Fetch landed PRs separately so failure doesn't block open/review PRs
     let seven_days_ago = {
@@ -749,7 +781,7 @@ pub async fn fetch_all_prs(_user: &str) -> Result<FetchResult, Box<dyn std::erro
 
     let (merged_prs, closed_authored) = landed_result;
     Ok(FetchResult {
-        my_prs: convert_prs(&my_nodes),
+        my_prs: convert_prs(&my_nodes, _user),
         review_prs,
         merged_prs,
         issues,
@@ -1486,12 +1518,70 @@ mod tests {
             updated_at: "2025-01-02T00:00:00Z".to_string(),
             review_decision: None,
             reviews: Default::default(),
+            review_requests: Default::default(),
             commits: None,
             comments: None,
             merged_at: if merged { Some("2025-01-02T00:00:00Z".to_string()) } else { None },
             closed_at: Some("2025-01-02T00:00:00Z".to_string()),
             timeline_items: None,
         }
+    }
+
+    fn pr_with_review_requests(logins: &[Option<&str>]) -> GqlPr {
+        let mut pr = closed_pr(1, false);
+        pr.review_requests = GqlNodes {
+            nodes: logins.iter().map(|l| GqlReviewRequest {
+                requested_reviewer: Some(GqlRequestedReviewer {
+                    login: l.map(|s| s.to_string()),
+                }),
+            }).collect(),
+            total_count: None,
+        };
+        pr
+    }
+
+    #[test]
+    fn re_review_requested_when_user_in_requests() {
+        let pr = pr_with_review_requests(&[Some("zou3519"), Some("aorenste")]);
+        assert!(extract_re_review_requested(&pr, "aorenste"));
+    }
+
+    #[test]
+    fn re_review_requested_is_case_insensitive() {
+        let pr = pr_with_review_requests(&[Some("AOrenste")]);
+        assert!(extract_re_review_requested(&pr, "aorenste"));
+    }
+
+    #[test]
+    fn no_re_review_when_user_absent() {
+        let pr = pr_with_review_requests(&[Some("zou3519")]);
+        assert!(!extract_re_review_requested(&pr, "aorenste"));
+    }
+
+    #[test]
+    fn no_re_review_when_no_requests() {
+        let pr = pr_with_review_requests(&[]);
+        assert!(!extract_re_review_requested(&pr, "aorenste"));
+    }
+
+    #[test]
+    fn team_request_without_login_ignored() {
+        // A Team review request has no `login` field — must not panic or match.
+        let pr = pr_with_review_requests(&[None]);
+        assert!(!extract_re_review_requested(&pr, "aorenste"));
+    }
+
+    #[test]
+    fn empty_user_never_re_review() {
+        let pr = pr_with_review_requests(&[Some("aorenste")]);
+        assert!(!extract_re_review_requested(&pr, ""));
+    }
+
+    #[test]
+    fn re_review_propagates_through_convert_prs() {
+        let pr = pr_with_review_requests(&[Some("aorenste")]);
+        let inserts = convert_prs(std::slice::from_ref(&pr), "aorenste");
+        assert!(inserts[0].re_review_requested);
     }
 
     #[test]

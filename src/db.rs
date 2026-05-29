@@ -57,6 +57,7 @@ pub struct ReviewPrRow {
     pub ci_approval_needed: bool,
     pub base_sha: String,
     pub is_mentioned: bool,
+    pub re_review_requested: bool,
 }
 
 pub struct PrInsert {
@@ -81,6 +82,7 @@ pub struct PrInsert {
     pub head_sha: String,
     pub ci_approval_needed: bool,
     pub base_sha: String,
+    pub re_review_requested: bool,
 }
 
 #[derive(Clone, Serialize, PartialEq)]
@@ -117,7 +119,7 @@ pub struct IssueInsert {
     pub labels: String,
 }
 
-const CURRENT_VERSION: i64 = 20;
+const CURRENT_VERSION: i64 = 21;
 
 /// Each entry migrates from version (index) to version (index + 1).
 const MIGRATIONS: &[&str] = &[
@@ -338,6 +340,10 @@ const MIGRATIONS: &[&str] = &[
     // 19 -> 20: track queued check count (subset of checks_pending)
     "ALTER TABLE prs ADD COLUMN checks_queued INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE review_prs ADD COLUMN checks_queued INTEGER NOT NULL DEFAULT 0",
+    // 20 -> 21: track whether you've been (re-)requested as a reviewer. A pending
+    // review request means the ball is in your court even if your last submitted
+    // review still makes GitHub's reviewDecision CHANGES_REQUESTED.
+    "ALTER TABLE review_prs ADD COLUMN re_review_requested INTEGER NOT NULL DEFAULT 0",
 ];
 
 pub fn init_db(path: &Path) -> Connection {
@@ -568,8 +574,8 @@ pub fn upsert_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Res
                                   author, is_draft, head_ref_name, base_ref_name,
                                   review_status, reviewers, checks_overall, checks_running,
                                   drci_status, drci_emoji, comment_count, head_sha, base_sha,
-                                  ci_approval_needed)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+                                  ci_approval_needed, re_review_requested)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
          ON CONFLICT(target_user, repo, number) DO UPDATE SET
            title = excluded.title,
            url = excluded.url,
@@ -589,7 +595,8 @@ pub fn upsert_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Res
            comment_count = excluded.comment_count,
            head_sha = excluded.head_sha,
            base_sha = excluded.base_sha,
-           ci_approval_needed = excluded.ci_approval_needed",
+           ci_approval_needed = excluded.ci_approval_needed,
+           re_review_requested = excluded.re_review_requested",
     )?;
     for pr in prs {
         stmt.execute(rusqlite::params![
@@ -598,7 +605,7 @@ pub fn upsert_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Res
             pr.author, pr.is_draft as i64, pr.head_ref_name, pr.base_ref_name,
             pr.review_status, pr.reviewers, pr.checks_overall, pr.checks_running as i64,
             pr.drci_status, pr.drci_emoji, pr.comment_count, pr.head_sha, pr.base_sha,
-            pr.ci_approval_needed as i64,
+            pr.ci_approval_needed as i64, pr.re_review_requested as i64,
         ])?;
     }
 
@@ -717,7 +724,7 @@ pub fn list_review_prs(conn: &Connection, user: &str) -> Vec<ReviewPrRow> {
                 drci_status, drci_emoji, comment_count, head_sha,
                 updated_at, ci_approval_needed,
                 checks_success, checks_fail, checks_pending, base_sha, is_mentioned,
-                checks_queued
+                checks_queued, re_review_requested
          FROM review_prs WHERE target_user = ?1
          ORDER BY is_mentioned DESC, ci_approval_needed DESC, updated_at DESC",
     ).unwrap();
@@ -748,6 +755,7 @@ pub fn list_review_prs(conn: &Connection, user: &str) -> Vec<ReviewPrRow> {
             base_sha: row.get(22)?,
             is_mentioned: row.get::<_, i64>(23)? != 0,
             checks_queued: row.get(24)?,
+            re_review_requested: row.get::<_, i64>(25)? != 0,
         })
     })
     .unwrap()
@@ -809,7 +817,7 @@ pub fn get_review_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> 
                 drci_status, drci_emoji, comment_count, head_sha,
                 updated_at, ci_approval_needed,
                 checks_success, checks_fail, checks_pending, base_sha, is_mentioned,
-                checks_queued
+                checks_queued, re_review_requested
          FROM review_prs WHERE target_user = ?1 AND repo = ?2 AND number = ?3",
         rusqlite::params![user, repo, number],
         |row| {
@@ -839,6 +847,7 @@ pub fn get_review_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> 
                 base_sha: row.get(22)?,
                 is_mentioned: row.get::<_, i64>(23)? != 0,
                 checks_queued: row.get(24)?,
+                re_review_requested: row.get::<_, i64>(25)? != 0,
             })
         },
     )
