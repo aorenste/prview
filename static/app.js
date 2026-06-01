@@ -430,13 +430,16 @@ function renderReviews() {
   renderHeaders('reviews-thead', reviewsCols, reviewsSort, toggleReviewsSort);
   // Mentions bypass every filter — even if a PR is a draft, approved, has
   // changes requested, or is marked read, a mention forces it visible.
-  // A pending re-review request likewise keeps the PR visible past the
-  // draft/approved/changes-requested hides, since the ball is in your court
-  // (e.g. a stale CHANGES_REQUESTED still drives GitHub's reviewDecision).
+  // A pending re-review request keeps the PR visible past the draft and
+  // changes-requested hides, since the ball is back in your court (e.g. a
+  // stale CHANGES_REQUESTED still drives GitHub's reviewDecision). It does
+  // NOT override the approved hide, though: an already-approved PR with a
+  // pending request for you is not something you need to act on, so only a
+  // mention forces an approved PR visible.
   const stays = p => p.is_mentioned || p.re_review_requested;
   let visible = allReviewPrs;
   if (!showDrafts) visible = visible.filter(p => stays(p) || !p.is_draft);
-  if (!showApproved) visible = visible.filter(p => stays(p) || p.review_status !== 'APPROVED');
+  if (!showApproved) visible = visible.filter(p => p.is_mentioned || p.review_status !== 'APPROVED');
   if (!showRejected) visible = visible.filter(p => stays(p) || p.review_status !== 'CHANGES_REQUESTED');
   if (showPassing) visible = visible.filter(p => p.is_mentioned || isCiPassing(p));
 
