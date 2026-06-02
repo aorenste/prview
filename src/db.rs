@@ -123,7 +123,10 @@ pub struct IssueInsert {
     pub labels: String,
 }
 
-const CURRENT_VERSION: i64 = 21;
+/// Derived from MIGRATIONS so adding a migration can't be forgotten here.
+/// Each MIGRATIONS entry takes version v -> v+1, so the latest version equals
+/// the number of entries.
+const CURRENT_VERSION: i64 = MIGRATIONS.len() as i64;
 
 /// Each entry migrates from version (index) to version (index + 1).
 const MIGRATIONS: &[&str] = &[
@@ -351,6 +354,12 @@ const MIGRATIONS: &[&str] = &[
     // 21 -> 22: track when DrCI last refreshed its comment, so the "Only show
     // passing" filter can distinguish DrCI still catching up from DrCI stuck.
     "ALTER TABLE review_prs ADD COLUMN drci_updated_at TEXT NOT NULL DEFAULT ''",
+    // 22 -> 23: is_mentioned is now a manual-override-only bit; the effective
+    // "mentioned" state is derived as (is_mentioned OR mention_count >
+    // last_mention_count). Clear the column once so stale auto-set bits (which
+    // used to stick on after a mention was edited/deleted) don't linger. Any
+    // genuinely-pending mention still shows via the derived expression.
+    "UPDATE review_prs SET is_mentioned = 0",
 ];
 
 pub fn init_db(path: &Path) -> Connection {
@@ -730,10 +739,12 @@ pub fn list_review_prs(conn: &Connection, user: &str) -> Vec<ReviewPrRow> {
                 review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count, head_sha,
                 updated_at, ci_approval_needed,
-                checks_success, checks_fail, checks_pending, base_sha, is_mentioned,
+                checks_success, checks_fail, checks_pending, base_sha,
+                (is_mentioned OR mention_count > last_mention_count),
                 checks_queued, re_review_requested, drci_updated_at
          FROM review_prs WHERE target_user = ?1
-         ORDER BY is_mentioned DESC, ci_approval_needed DESC, updated_at DESC",
+         ORDER BY (is_mentioned OR mention_count > last_mention_count) DESC,
+                  ci_approval_needed DESC, updated_at DESC",
     ).unwrap();
     stmt.query_map(rusqlite::params![user], |row| {
         Ok(ReviewPrRow {
@@ -824,7 +835,8 @@ pub fn get_review_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> 
                 review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count, head_sha,
                 updated_at, ci_approval_needed,
-                checks_success, checks_fail, checks_pending, base_sha, is_mentioned,
+                checks_success, checks_fail, checks_pending, base_sha,
+                (is_mentioned OR mention_count > last_mention_count),
                 checks_queued, re_review_requested, drci_updated_at
          FROM review_prs WHERE target_user = ?1 AND repo = ?2 AND number = ?3",
         rusqlite::params![user, repo, number],
@@ -936,11 +948,15 @@ pub fn update_pr_details(conn: &Connection, repo: &str, number: i64, user: &str,
 
 pub fn update_review_pr_details(conn: &Connection, repo: &str, number: i64, user: &str, d: &PrDetailUpdate) {
     conn.execute(
+        // Only record the raw mention_count here. Whether the PR counts as
+        // "mentioned" is derived on read as (manual is_mentioned bit) OR
+        // (mention_count > last_mention_count) — see list_review_prs/get_review_pr.
+        // Deriving it means an edited/deleted @-mention (mention_count drops)
+        // clears the pill instead of leaving the auto-set bit stuck on.
         "UPDATE review_prs SET
             checks_success = ?1, checks_fail = ?2, checks_pending = ?3, checks_running = ?4,
             drci_emoji = ?5, drci_status = ?6,
             mention_count = ?7,
-            is_mentioned = CASE WHEN ?7 > last_mention_count THEN 1 ELSE is_mentioned END,
             checks_queued = ?8,
             drci_updated_at = ?12,
             detail_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
@@ -1066,6 +1082,127 @@ mod tests {
                 detail_updated_at, checks_overall,
             ],
         ).unwrap();
+    }
+
+    fn detail(mention_count: i64) -> PrDetailUpdate {
+        PrDetailUpdate {
+            checks_success: 0,
+            checks_fail: 0,
+            checks_pending: 0,
+            checks_queued: 0,
+            checks_running: false,
+            drci_emoji: String::new(),
+            drci_status: String::new(),
+            drci_updated_at: String::new(),
+            landing_status: String::new(),
+            mention_count,
+        }
+    }
+
+    fn is_mentioned(conn: &Connection, number: i64) -> bool {
+        get_review_pr(conn, "pytorch/pytorch", number, "me").unwrap().is_mentioned
+    }
+
+    #[test]
+    fn auto_mention_clears_when_the_mention_disappears() {
+        // Repro for #167224: a comment @-mentions you (mention_count rises), then
+        // that comment is edited/deleted (mention_count falls). The pill must not
+        // stay stuck.
+        let conn = test_db();
+        insert_review_pr(&conn, 167224, "2020-01-01T00:00:00Z", "SUCCESS");
+
+        update_review_pr_details(&conn, "pytorch/pytorch", 167224, "me", &detail(1));
+        assert!(is_mentioned(&conn, 167224), "a new mention should light up the pill");
+
+        update_review_pr_details(&conn, "pytorch/pytorch", 167224, "me", &detail(0));
+        assert!(!is_mentioned(&conn, 167224),
+            "once the mention is gone the pill must clear");
+    }
+
+    #[test]
+    fn manual_mention_survives_detail_refresh_with_no_mentions() {
+        // "Mark mention" is an explicit override and must not be wiped by the
+        // next detail fetch that finds zero @-mentions.
+        let conn = test_db();
+        insert_review_pr(&conn, 1, "2020-01-01T00:00:00Z", "SUCCESS");
+
+        set_review_mention(&conn, "pytorch/pytorch", 1, true, "me");
+        update_review_pr_details(&conn, "pytorch/pytorch", 1, "me", &detail(0));
+        assert!(is_mentioned(&conn, 1), "a manual mention should persist");
+    }
+
+    #[test]
+    fn reading_acknowledges_mention_and_does_not_refire_for_same_count() {
+        let conn = test_db();
+        insert_review_pr(&conn, 2, "2020-01-01T00:00:00Z", "SUCCESS");
+
+        update_review_pr_details(&conn, "pytorch/pytorch", 2, "me", &detail(1));
+        assert!(is_mentioned(&conn, 2));
+
+        set_review_read(&conn, "pytorch/pytorch", 2, true, "me");
+        assert!(!is_mentioned(&conn, 2), "marking read clears the mention");
+
+        // Same mention still present on the next fetch — must stay acknowledged.
+        update_review_pr_details(&conn, "pytorch/pytorch", 2, "me", &detail(1));
+        assert!(!is_mentioned(&conn, 2), "an already-read mention should not refire");
+
+        // A genuinely new mention re-fires.
+        update_review_pr_details(&conn, "pytorch/pytorch", 2, "me", &detail(2));
+        assert!(is_mentioned(&conn, 2), "an additional mention should refire");
+    }
+
+    #[test]
+    fn migration_clears_stale_mention_bit() {
+        // A pre-existing DB can have is_mentioned stuck on from the old auto-set
+        // (mention edited/deleted -> count dropped but bit never cleared). The
+        // 22->23 migration must reset it. Build a v22 DB, plant a stuck row, then
+        // migrate.
+        let conn = Connection::open_in_memory().unwrap();
+        for (i, m) in MIGRATIONS[0..22].iter().enumerate() {
+            // Mirror run_migrations' special-case: the 6->7 is_draft ALTER is a
+            // no-op on DBs whose initial schema already had the column.
+            if i == 6 && has_column(&conn, "prs", "is_draft") {
+                continue;
+            }
+            conn.execute_batch(m).unwrap();
+        }
+        conn.execute_batch("PRAGMA user_version = 22").unwrap();
+        conn.execute(
+            "INSERT INTO review_prs
+                (target_user, number, repo, title, url, state, created_at, updated_at,
+                 is_mentioned, mention_count, last_mention_count)
+             VALUES ('me', 167224, 'pytorch/pytorch', 't', 'u', 'OPEN', '', '', 1, 0, 0)",
+            [],
+        ).unwrap();
+
+        run_migrations(&conn, 22);
+
+        assert!(!is_mentioned(&conn, 167224),
+            "the 22->23 migration should clear a stuck auto-set mention bit");
+    }
+
+    #[test]
+    fn migrations_run_through_latest_version() {
+        // Guards against CURRENT_VERSION drifting behind the MIGRATIONS array:
+        // a missing migration leaves the schema short a column, and the SELECTs
+        // below then panic at runtime (poisoning the db mutex in production).
+        let conn = test_db();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version as usize, MIGRATIONS.len(),
+            "every migration in MIGRATIONS must run");
+        assert!(has_column(&conn, "review_prs", "drci_updated_at"));
+    }
+
+    #[test]
+    fn review_pr_queries_match_schema() {
+        // Exercises the full SELECT column lists; panics if a referenced column
+        // (e.g. drci_updated_at) wasn't added by a migration.
+        let conn = test_db();
+        let _ = list_review_prs(&conn, "me");
+        let _ = get_review_pr(&conn, "pytorch/pytorch", 1, "me");
+        let _ = list_prs(&conn, true, "me");
     }
 
     #[test]
