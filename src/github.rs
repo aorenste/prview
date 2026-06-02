@@ -240,7 +240,7 @@ const REVIEW_PR_FIELDS: &str = "
   baseRef { target { oid } }
   repository { nameWithOwner }
   state createdAt updatedAt reviewDecision
-  reviews(first: 20) { nodes { author { login } state } }
+  reviews(first: 20) { nodes { author { login } state commit { oid } } }
   reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } } } }
   commits(last: 1) { nodes { commit {
     oid
@@ -358,6 +358,15 @@ struct GqlRef {
 struct GqlReview {
     author: GqlAuthor,
     state: String,
+    /// The commit this review was submitted against. Lets us tell when the
+    /// author has pushed new commits since the review.
+    #[serde(default)]
+    commit: Option<GqlReviewCommit>,
+}
+
+#[derive(Deserialize)]
+struct GqlReviewCommit {
+    oid: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -633,7 +642,15 @@ async fn run_query(search_filter: &str, fields: &str) -> Result<Vec<GqlPr>, Box<
 
 fn convert_prs(nodes: &[GqlPr], user: &str) -> Vec<PrInsert> {
     nodes.iter().map(|pr| {
-        let (review_status, reviewers) = extract_reviews(pr);
+        let (mut review_status, reviewers) = extract_reviews(pr);
+        // If you requested changes but the author has since pushed a new commit
+        // without re-requesting review, your CHANGES_REQUESTED is stale. Present
+        // the decision as undecided so the PR drops out of the changes-requested
+        // filter and shows as a normal pending review again. (Your actual review
+        // state is still visible in the per-reviewer breakdown / reviewers list.)
+        if extract_new_commit_since_review(pr, user) {
+            review_status.clear();
+        }
         let (drci_emoji, drci_status) = extract_drci(pr);
         let comment_count = extract_comment_count(pr);
 
@@ -662,6 +679,42 @@ fn convert_prs(nodes: &[GqlPr], user: &str) -> Vec<PrInsert> {
             re_review_requested: extract_re_review_requested(pr, user),
         }
     }).collect()
+}
+
+/// True when YOU requested changes and the author has since pushed a new commit
+/// without re-requesting review. GitHub leaves reviewDecision at
+/// CHANGES_REQUESTED in that case, so the PR would otherwise stay hidden behind
+/// the changes-requested filter even though the ball is back in your court.
+///
+/// Detected by SHA, not timestamps: your latest decisive review (APPROVED or
+/// CHANGES_REQUESTED, ignoring COMMENTED) is CHANGES_REQUESTED and was made
+/// against a commit other than the current head.
+fn extract_new_commit_since_review(pr: &GqlPr, user: &str) -> bool {
+    if user.is_empty() {
+        return false;
+    }
+    let head = extract_head_sha(pr);
+    if head.is_empty() {
+        return false;
+    }
+    // Walk reviews in chronological order; keep my last decisive one.
+    let mut my_last: Option<&GqlReview> = None;
+    for r in &pr.reviews.nodes {
+        if !r.author.login.eq_ignore_ascii_case(user) {
+            continue;
+        }
+        if matches!(r.state.as_str(), "APPROVED" | "CHANGES_REQUESTED") {
+            my_last = Some(r);
+        }
+    }
+    match my_last {
+        Some(r) if r.state == "CHANGES_REQUESTED" => r
+            .commit
+            .as_ref()
+            .and_then(|c| c.oid.as_deref())
+            .is_some_and(|oid| oid != head),
+        _ => false,
+    }
 }
 
 /// True if `user` is in the PR's pending review-request list. GitHub keeps a
@@ -1613,6 +1666,94 @@ mod tests {
             total_count: None,
         };
         pr
+    }
+
+    // Build a PR with a head commit `head` and a set of (login, state, reviewed_oid)
+    // reviews, for testing extract_new_commit_since_review.
+    fn pr_with_reviews(head: &str, reviews: &[(&str, &str, &str)]) -> GqlPr {
+        let mut pr = closed_pr(1, false);
+        pr.commits = Some(GqlNodes {
+            nodes: vec![GqlCommitNode {
+                commit: GqlCommit {
+                    oid: Some(head.to_string()),
+                    status_check_rollup: None,
+                    check_suites: None,
+                },
+            }],
+            total_count: None,
+        });
+        pr.reviews = GqlNodes {
+            nodes: reviews.iter().map(|(login, state, oid)| GqlReview {
+                author: GqlAuthor { login: login.to_string() },
+                state: state.to_string(),
+                commit: Some(GqlReviewCommit { oid: Some(oid.to_string()) }),
+            }).collect(),
+            total_count: None,
+        };
+        pr
+    }
+
+    #[test]
+    fn new_commit_when_changes_requested_against_older_commit() {
+        let pr = pr_with_reviews("sha2", &[("aorenste", "CHANGES_REQUESTED", "sha1")]);
+        assert!(extract_new_commit_since_review(&pr, "aorenste"));
+    }
+
+    #[test]
+    fn no_new_commit_when_reviewed_current_head() {
+        let pr = pr_with_reviews("sha1", &[("aorenste", "CHANGES_REQUESTED", "sha1")]);
+        assert!(!extract_new_commit_since_review(&pr, "aorenste"));
+    }
+
+    #[test]
+    fn no_new_commit_when_i_approved_after_requesting_changes() {
+        let pr = pr_with_reviews("sha2", &[
+            ("aorenste", "CHANGES_REQUESTED", "sha1"),
+            ("aorenste", "APPROVED", "sha2"),
+        ]);
+        assert!(!extract_new_commit_since_review(&pr, "aorenste"));
+    }
+
+    #[test]
+    fn comment_after_changes_requested_does_not_reset_decision() {
+        // A COMMENTED review isn't decisive — my last decisive review is still
+        // CHANGES_REQUESTED, made against an older commit.
+        let pr = pr_with_reviews("sha2", &[
+            ("aorenste", "CHANGES_REQUESTED", "sha1"),
+            ("aorenste", "COMMENTED", "sha1"),
+        ]);
+        assert!(extract_new_commit_since_review(&pr, "aorenste"));
+    }
+
+    #[test]
+    fn another_reviewers_changes_request_ignored() {
+        let pr = pr_with_reviews("sha2", &[("zou3519", "CHANGES_REQUESTED", "sha1")]);
+        assert!(!extract_new_commit_since_review(&pr, "aorenste"));
+    }
+
+    #[test]
+    fn new_commit_since_review_empty_user_false() {
+        let pr = pr_with_reviews("sha2", &[("aorenste", "CHANGES_REQUESTED", "sha1")]);
+        assert!(!extract_new_commit_since_review(&pr, ""));
+    }
+
+    #[test]
+    fn new_commit_clears_review_status_in_convert_prs() {
+        // A stale CHANGES_REQUESTED is presented as undecided so it falls out of
+        // the changes-requested filter and shows as a pending review.
+        let mut pr = pr_with_reviews("sha2", &[("aorenste", "CHANGES_REQUESTED", "sha1")]);
+        pr.review_decision = Some("CHANGES_REQUESTED".to_string());
+        let inserts = convert_prs(std::slice::from_ref(&pr), "aorenste");
+        assert_eq!(inserts[0].review_status, "");
+    }
+
+    #[test]
+    fn changes_requested_kept_when_no_new_commit() {
+        // Same head as the review -> not stale -> keep CHANGES_REQUESTED.
+        let mut pr = pr_with_reviews("sha1", &[("aorenste", "CHANGES_REQUESTED", "sha1")]);
+        pr.review_decision = Some("CHANGES_REQUESTED".to_string());
+        let inserts = convert_prs(std::slice::from_ref(&pr), "aorenste");
+        assert_eq!(inserts[0].review_status, "CHANGES_REQUESTED");
     }
 
     #[test]
