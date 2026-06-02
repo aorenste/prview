@@ -612,7 +612,13 @@ pub fn upsert_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Res
            head_sha = excluded.head_sha,
            base_sha = excluded.base_sha,
            ci_approval_needed = excluded.ci_approval_needed,
-           re_review_requested = excluded.re_review_requested",
+           re_review_requested = excluded.re_review_requested,
+           -- When CI first needs your approval (false -> true), surface the PR
+           -- by marking it unread. References to review_prs columns here are the
+           -- pre-update values; excluded.* are the incoming ones.
+           is_read = CASE
+               WHEN excluded.ci_approval_needed = 1 AND ci_approval_needed = 0
+               THEN 0 ELSE is_read END",
     )?;
     for pr in prs {
         stmt.execute(rusqlite::params![
@@ -1101,6 +1107,67 @@ mod tests {
 
     fn is_mentioned(conn: &Connection, number: i64) -> bool {
         get_review_pr(conn, "pytorch/pytorch", number, "me").unwrap().is_mentioned
+    }
+
+    fn is_read(conn: &Connection, number: i64) -> bool {
+        get_review_pr(conn, "pytorch/pytorch", number, "me").unwrap().is_read
+    }
+
+    fn review_insert(number: i64, ci_approval_needed: bool, updated_at: &str) -> PrInsert {
+        PrInsert {
+            number,
+            repo: "pytorch/pytorch".to_string(),
+            title: "t".to_string(),
+            url: "u".to_string(),
+            state: "OPEN".to_string(),
+            created_at: String::new(),
+            updated_at: updated_at.to_string(),
+            author: "a".to_string(),
+            is_draft: false,
+            head_ref_name: String::new(),
+            base_ref_name: String::new(),
+            review_status: String::new(),
+            reviewers: "[]".to_string(),
+            checks_overall: String::new(),
+            checks_running: false,
+            drci_status: String::new(),
+            drci_emoji: String::new(),
+            comment_count: 0,
+            head_sha: String::new(),
+            ci_approval_needed,
+            base_sha: String::new(),
+            re_review_requested: false,
+        }
+    }
+
+    #[test]
+    fn newly_needed_ci_approval_marks_a_read_pr_unread() {
+        // When CI first needs your approval, surface the PR by marking it unread.
+        let conn = test_db();
+        upsert_review_prs(&conn, &[review_insert(167224, false, "t1")], "me").unwrap();
+        set_review_read(&conn, "pytorch/pytorch", 167224, true, "me");
+        assert!(is_read(&conn, 167224), "precondition: PR is read");
+
+        // CI approval becomes needed (updated_at also advances, as in production).
+        upsert_review_prs(&conn, &[review_insert(167224, true, "t2")], "me").unwrap();
+        assert!(!is_read(&conn, 167224),
+            "newly-needed CI approval should mark the PR unread");
+    }
+
+    #[test]
+    fn unchanged_ci_approval_does_not_touch_read_state() {
+        let conn = test_db();
+        // Already needs approval and you've read it: must stay read.
+        upsert_review_prs(&conn, &[review_insert(2, true, "t1")], "me").unwrap();
+        set_review_read(&conn, "pytorch/pytorch", 2, true, "me");
+        upsert_review_prs(&conn, &[review_insert(2, true, "t2")], "me").unwrap();
+        assert!(is_read(&conn, 2), "an already-needed CI approval should not re-unread");
+
+        // Never needed approval: must stay read.
+        upsert_review_prs(&conn, &[review_insert(3, false, "t1")], "me").unwrap();
+        set_review_read(&conn, "pytorch/pytorch", 3, true, "me");
+        upsert_review_prs(&conn, &[review_insert(3, false, "t2")], "me").unwrap();
+        assert!(is_read(&conn, 3), "no CI-approval transition should change read state");
     }
 
     #[test]

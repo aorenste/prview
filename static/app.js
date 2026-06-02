@@ -450,18 +450,22 @@ function renderReviews() {
   renderHeaders('reviews-thead', reviewsCols, reviewsSort, toggleReviewsSort);
   // Mentions bypass every filter — even if a PR is a draft, approved, has
   // changes requested, or is marked read, a mention forces it visible.
+  // CI approval needed is likewise a "ball in your court" action item (CI
+  // won't run until you approve it), so it overrides the state hides and the
+  // passing filter too.
   // A pending re-review request keeps the PR visible past the draft and
   // changes-requested hides, since the ball is back in your court (e.g. a
   // stale CHANGES_REQUESTED still drives GitHub's reviewDecision). It does
   // NOT override the approved hide, though: an already-approved PR with a
   // pending request for you is not something you need to act on, so only a
-  // mention forces an approved PR visible.
-  const stays = p => p.is_mentioned || p.re_review_requested;
+  // mention (or CI approval) forces an approved PR visible.
+  const action = p => p.is_mentioned || p.ci_approval_needed;
+  const stays = p => action(p) || p.re_review_requested;
   let visible = allReviewPrs;
   if (!showDrafts) visible = visible.filter(p => stays(p) || !p.is_draft);
-  if (!showApproved) visible = visible.filter(p => p.is_mentioned || p.review_status !== 'APPROVED');
+  if (!showApproved) visible = visible.filter(p => action(p) || p.review_status !== 'APPROVED');
   if (!showRejected) visible = visible.filter(p => stays(p) || p.review_status !== 'CHANGES_REQUESTED');
-  if (showPassing) visible = visible.filter(p => p.is_mentioned || isCiPassing(p));
+  if (showPassing) visible = visible.filter(p => action(p) || isCiPassing(p));
 
   // Count read items before applying read filter (for tab badge and chip)
   const unreadCount = visible.filter(p => !p.is_read).length;

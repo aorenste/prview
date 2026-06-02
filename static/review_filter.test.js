@@ -21,6 +21,7 @@ function reviewPr(overrides) {
     is_read: false,
     is_mentioned: false,
     re_review_requested: false,
+    ci_approval_needed: false,
     drci_emoji: '',
     drci_status: '',
     drci_updated_at: '',
@@ -205,4 +206,55 @@ test('Only show passing: a mention is always shown', () => {
   })]);
   assert.ok(rowKeys(win).includes('pytorch/pytorch#8'),
     'a mention bypasses the passing filter');
+});
+
+// --- CI approval needed is a "ball in your court" signal ---
+// When CI requires your approval to run, the PR needs your action, so it must
+// stay visible past the state hides (changes-requested / approved) and the
+// passing filter.
+
+test('CI-approval-needed PR stays visible past the changes-requested hide', () => {
+  // Repro for #167224: CHANGES_REQUESTED (so the default hide applies) but it
+  // needs your CI approval. showRejected is off by default.
+  const win = loadApp();
+  feedReviews(win, [reviewPr({
+    number: 167224,
+    review_status: 'CHANGES_REQUESTED',
+    ci_approval_needed: true,
+  })]);
+  assert.ok(rowKeys(win).includes('pytorch/pytorch#167224'),
+    'a PR needing CI approval should override the changes-requested hide');
+});
+
+test('changes-requested PR without CI approval is still hidden', () => {
+  const win = loadApp();
+  feedReviews(win, [reviewPr({
+    number: 9,
+    review_status: 'CHANGES_REQUESTED',
+  })]);
+  assert.ok(!rowKeys(win).includes('pytorch/pytorch#9'),
+    'a plain changes-requested PR should still be hidden by default');
+});
+
+test('CI-approval-needed PR stays visible under Only show passing', () => {
+  // Even if its rollup is green, a PR awaiting your CI approval needs action.
+  const win = passingOnly();
+  feedReviews(win, [reviewPr({
+    number: 10,
+    checks_overall: 'PENDING',
+    ci_approval_needed: true,
+  })]);
+  assert.ok(rowKeys(win).includes('pytorch/pytorch#10'),
+    'a PR needing CI approval should override the passing filter');
+});
+
+test('CI-approval-needed PR stays visible past the approved hide', () => {
+  const win = loadApp();
+  feedReviews(win, [reviewPr({
+    number: 11,
+    review_status: 'APPROVED',
+    ci_approval_needed: true,
+  })]);
+  assert.ok(rowKeys(win).includes('pytorch/pytorch#11'),
+    'a PR needing CI approval should override the approved hide');
 });
