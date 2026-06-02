@@ -994,6 +994,8 @@ struct DetailComment {
     body: String,
     #[serde(rename = "createdAt")]
     created_at: Option<String>,
+    #[serde(default, rename = "updatedAt")]
+    updated_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1063,7 +1065,7 @@ pub async fn fetch_pr_details(repo: &str, number: i64, include_landing: bool, me
           }} }}
         }}
       }} }} }}
-      comments(last:100) {{ nodes {{ author {{ login }} body createdAt }} }}
+      comments(last:100) {{ nodes {{ author {{ login }} body createdAt updatedAt }} }}
     }}
   }}
 }}"#,
@@ -1128,7 +1130,7 @@ pub async fn fetch_pr_details(repo: &str, number: i64, include_landing: bool, me
     let (success, fail, pending, queued) = count_check_contexts(&all_context_nodes);
 
     // Extract DrCI from comments
-    let (drci_emoji, drci_status) = extract_drci_from_detail_comments(&pr.comments.nodes);
+    let (drci_emoji, drci_status, drci_updated_at) = extract_drci_from_detail_comments(&pr.comments.nodes);
 
     // Extract landing status from pytorchmergebot comments
     let landing_status = if include_landing {
@@ -1147,6 +1149,7 @@ pub async fn fetch_pr_details(repo: &str, number: i64, include_landing: bool, me
         checks_running: pending > 0,
         drci_emoji,
         drci_status,
+        drci_updated_at,
         landing_status,
         mention_count,
     })
@@ -1184,7 +1187,11 @@ fn count_mentions(comments: &[DetailComment], user: &str) -> i64 {
     count
 }
 
-fn extract_drci_from_detail_comments(comments: &[DetailComment]) -> (String, String) {
+/// Returns (emoji, status, drci_updated_at). The timestamp is the DrCI comment's
+/// last edit time (it refreshes every ~15 min) and is returned whenever the DrCI
+/// comment exists, even if it hasn't posted a status line yet — that lets callers
+/// tell "DrCI is still catching up" from "DrCI is stuck".
+fn extract_drci_from_detail_comments(comments: &[DetailComment]) -> (String, String, String) {
     for comment in comments {
         let login = comment.author.as_ref().map(|a| a.login.as_str()).unwrap_or("");
         if login != "pytorch-bot" && login != "pytorch-bot[bot]" {
@@ -1193,6 +1200,9 @@ fn extract_drci_from_detail_comments(comments: &[DetailComment]) -> (String, Str
         if !comment.body.contains("drci-comment-start") {
             continue;
         }
+        let updated_at = comment.updated_at.clone()
+            .or_else(|| comment.created_at.clone())
+            .unwrap_or_default();
         for line in comment.body.lines() {
             if line.starts_with("## :") && !line.contains("Helpful Links") && !line.contains("Active SEV") {
                 if let Some(rest) = line.strip_prefix("## :") {
@@ -1202,14 +1212,16 @@ fn extract_drci_from_detail_comments(comments: &[DetailComment]) -> (String, Str
                         if status.starts_with("You can merge normally") {
                             emoji = "white_check_mark".to_string();
                         }
-                        return (emoji, status);
+                        return (emoji, status, updated_at);
                     }
                 }
             }
         }
-        break;
+        // DrCI comment exists but has no status verdict yet — still report when
+        // it was last touched so staleness can be judged.
+        return (String::new(), String::new(), updated_at);
     }
-    (String::new(), String::new())
+    (String::new(), String::new(), String::new())
 }
 
 fn extract_landing_status(comments: &[DetailComment], committed_date: Option<&str>) -> String {
@@ -1304,7 +1316,7 @@ const DETAIL_PR_FRAGMENT: &str = "
         } }
       }
     } } }
-    comments(last:100) { nodes { author { login } body createdAt } }
+    comments(last:100) { nodes { author { login } body createdAt updatedAt } }
 ";
 
 /// Fetch details for multiple PRs in the same repo using a single aliased GraphQL query.
@@ -1386,7 +1398,7 @@ pub async fn fetch_pr_details_batch(
         }
 
         let (success, fail, pending, queued) = count_check_contexts(&all_context_nodes);
-        let (drci_emoji, drci_status) = extract_drci_from_detail_comments(&pr.comments.nodes);
+        let (drci_emoji, drci_status, drci_updated_at) = extract_drci_from_detail_comments(&pr.comments.nodes);
         let include_landing = include_map.get(&num).copied().unwrap_or(false);
         let landing_status = if include_landing {
             extract_landing_status(&pr.comments.nodes, committed_date.as_deref())
@@ -1403,6 +1415,7 @@ pub async fn fetch_pr_details_batch(
             checks_running: pending > 0,
             drci_emoji,
             drci_status,
+            drci_updated_at,
             landing_status,
             mention_count,
         }));
@@ -1420,7 +1433,69 @@ mod tests {
             author: None,
             body: body.to_string(),
             created_at: None,
+            updated_at: None,
         }
+    }
+
+    fn drci_comment(body: &str, updated_at: Option<&str>) -> DetailComment {
+        DetailComment {
+            author: Some(GqlAuthor { login: "pytorch-bot".to_string() }),
+            body: format!("<!-- drci-comment-start -->\n{}", body),
+            created_at: Some("2026-01-01T00:00:00Z".to_string()),
+            updated_at: updated_at.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn drci_verdict_returns_emoji_status_and_timestamp() {
+        let cs = vec![drci_comment(
+            "## :white_check_mark: All checks passing",
+            Some("2026-06-01T00:14:34Z"),
+        )];
+        let (emoji, status, updated_at) = extract_drci_from_detail_comments(&cs);
+        assert_eq!(emoji, "white_check_mark");
+        assert_eq!(status, "All checks passing");
+        assert_eq!(updated_at, "2026-06-01T00:14:34Z");
+    }
+
+    #[test]
+    fn drci_merge_normally_normalizes_to_check_mark() {
+        let cs = vec![drci_comment(
+            "## :hourglass: You can merge normally now",
+            Some("2026-06-01T00:14:34Z"),
+        )];
+        let (emoji, _status, _) = extract_drci_from_detail_comments(&cs);
+        assert_eq!(emoji, "white_check_mark");
+    }
+
+    #[test]
+    fn drci_comment_without_verdict_still_returns_timestamp() {
+        // Repro for #184133: DrCI has only posted the Helpful Links section, no
+        // status line yet. We must still surface when it last refreshed so the
+        // frontend can judge staleness.
+        let cs = vec![drci_comment(
+            "## :link: Helpful Links\n* some link",
+            Some("2026-06-01T00:14:34Z"),
+        )];
+        let (emoji, status, updated_at) = extract_drci_from_detail_comments(&cs);
+        assert_eq!(emoji, "");
+        assert_eq!(status, "");
+        assert_eq!(updated_at, "2026-06-01T00:14:34Z");
+    }
+
+    #[test]
+    fn drci_timestamp_falls_back_to_created_at() {
+        let mut c = drci_comment("## :link: Helpful Links", None);
+        c.created_at = Some("2026-05-01T00:00:00Z".to_string());
+        let (_emoji, _status, updated_at) = extract_drci_from_detail_comments(&[c]);
+        assert_eq!(updated_at, "2026-05-01T00:00:00Z");
+    }
+
+    #[test]
+    fn no_drci_comment_returns_empty_timestamp() {
+        let cs = vec![comment("just a regular comment")];
+        let (_emoji, _status, updated_at) = extract_drci_from_detail_comments(&cs);
+        assert_eq!(updated_at, "");
     }
 
     #[test]

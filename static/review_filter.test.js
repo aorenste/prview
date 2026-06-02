@@ -23,8 +23,15 @@ function reviewPr(overrides) {
     re_review_requested: false,
     drci_emoji: '',
     drci_status: '',
+    drci_updated_at: '',
+    checks_overall: '',
+    checks_running: false,
     comment_count: 0,
   }, overrides);
+}
+
+function minutesAgo(n) {
+  return new Date(Date.now() - n * 60 * 1000).toISOString();
 }
 
 function feedReviews(win, prs) {
@@ -88,4 +95,114 @@ test('approved PR you were mentioned in stays visible', () => {
     rowKeys(win).includes('pytorch/pytorch#300'),
     'a mention should force an approved PR visible'
   );
+});
+
+// --- "Only show passing" filter ---
+//
+// Spec (in priority order):
+//  1. CI still building            -> not passing (hidden)
+//  2. CI fully green               -> passing (shown)
+//  3+ CI has red -> defer to DrCI:
+//  3. DrCI says passing            -> shown
+//  4. DrCI says failing            -> hidden
+//  5. DrCI no verdict, >20m stale  -> indeterminate, shown (so it isn't lost)
+//  6. DrCI no verdict, recent      -> still catching up = building, hidden
+
+function passingOnly() {
+  return loadApp({ prefs: { showPassing: true } });
+}
+
+test('Only show passing: still-building PR is hidden (rule 1)', () => {
+  // Repro for #184133: rollup PENDING, DrCI has not posted a verdict yet.
+  const win = passingOnly();
+  feedReviews(win, [reviewPr({
+    number: 184133,
+    checks_overall: 'PENDING',
+    checks_running: true,
+  })]);
+
+  assert.ok(
+    !rowKeys(win).includes('pytorch/pytorch#184133'),
+    'a building PR should not appear under "Only show passing"'
+  );
+});
+
+test('Only show passing: fully green PR is shown (rule 2)', () => {
+  const win = passingOnly();
+  feedReviews(win, [reviewPr({ number: 2, checks_overall: 'SUCCESS' })]);
+
+  assert.ok(rowKeys(win).includes('pytorch/pytorch#2'),
+    'a fully green PR should appear under "Only show passing"');
+});
+
+test('Only show passing: green wins even if a check is still running (rule 1 before 2)', () => {
+  // A PR that is still running is building regardless of how many checks passed.
+  const win = passingOnly();
+  feedReviews(win, [reviewPr({
+    number: 3,
+    checks_overall: 'PENDING',
+    checks_running: true,
+  })]);
+  assert.ok(!rowKeys(win).includes('pytorch/pytorch#3'),
+    'a running PR is building, not passing');
+});
+
+test('Only show passing: red CI + DrCI says pass is shown (rule 3)', () => {
+  const win = passingOnly();
+  feedReviews(win, [reviewPr({
+    number: 4,
+    checks_overall: 'FAILURE',
+    drci_emoji: 'white_check_mark',
+    drci_updated_at: minutesAgo(2),
+  })]);
+  assert.ok(rowKeys(win).includes('pytorch/pytorch#4'),
+    'red CI that DrCI clears as passing should be shown');
+});
+
+test('Only show passing: red CI + DrCI says fail is hidden (rule 4)', () => {
+  const win = passingOnly();
+  feedReviews(win, [reviewPr({
+    number: 5,
+    checks_overall: 'FAILURE',
+    drci_emoji: 'x',
+    drci_updated_at: minutesAgo(2),
+  })]);
+  assert.ok(!rowKeys(win).includes('pytorch/pytorch#5'),
+    'red CI that DrCI confirms as failing should be hidden');
+});
+
+test('Only show passing: red CI + no DrCI verdict, stale DrCI is shown (rule 5)', () => {
+  const win = passingOnly();
+  feedReviews(win, [reviewPr({
+    number: 6,
+    checks_overall: 'FAILURE',
+    drci_emoji: '',
+    drci_updated_at: minutesAgo(30),
+  })]);
+  assert.ok(rowKeys(win).includes('pytorch/pytorch#6'),
+    'when DrCI is stale (>20m) and has no verdict, surface the PR');
+});
+
+test('Only show passing: red CI + no DrCI verdict, recent DrCI is hidden (rule 6)', () => {
+  const win = passingOnly();
+  feedReviews(win, [reviewPr({
+    number: 7,
+    checks_overall: 'FAILURE',
+    drci_emoji: '',
+    drci_updated_at: minutesAgo(5),
+  })]);
+  assert.ok(!rowKeys(win).includes('pytorch/pytorch#7'),
+    'a recently-updated DrCI with no verdict means we are still waiting (building)');
+});
+
+test('Only show passing: a mention is always shown', () => {
+  const win = passingOnly();
+  feedReviews(win, [reviewPr({
+    number: 8,
+    checks_overall: 'FAILURE',
+    drci_emoji: 'x',
+    is_mentioned: true,
+  })]);
+  assert.ok(rowKeys(win).includes('pytorch/pytorch#8'),
+    'a mention bypasses the passing filter');
 });

@@ -420,10 +420,30 @@ function toggleReviewsSort(col) {
   renderReviews();
 }
 
+// Has DrCI gone quiet? Its comment refreshes ~every 15 min, so no update in
+// over 20 min means it's probably stuck and we shouldn't keep waiting on it.
+// A missing/unparseable timestamp counts as stale (nothing to wait on).
+function drciIsStale(pr) {
+  const t = Date.parse(pr.drci_updated_at || '');
+  if (Number.isNaN(t)) return true;
+  return (Date.now() - t) > 20 * 60 * 1000;
+}
+
 function isCiPassing(pr) {
-  // DrCI-based: only hide PRs DrCI marks as failing or running. Empty DrCI
-  // (not yet reported) and unknown emojis stay visible.
-  return pr.drci_emoji !== 'x' && pr.drci_emoji !== 'hourglass_flowing_sand';
+  // Decides whether a PR survives the "Only show passing" filter. Priority:
+  //   1. CI still building            -> not passing (CI isn't done yet)
+  //   2. CI fully green               -> passing
+  //   3+ CI has red -> defer to DrCI, which knows about flaky/unrelated failures:
+  //   3. DrCI says passing            -> passing
+  //   4. DrCI says failing            -> not passing
+  //   5. DrCI gave no verdict and has gone stale -> indeterminate, treat as
+  //      passing so the PR still surfaces here (otherwise we'd never see it)
+  //   6. DrCI gave no verdict but updated recently -> still catching up = building
+  if (pr.checks_overall === 'PENDING' || pr.checks_running) return false;  // 1
+  if (pr.checks_overall === 'SUCCESS') return true;                         // 2
+  if (pr.drci_emoji === 'white_check_mark') return true;                    // 3
+  if (pr.drci_emoji === 'x') return false;                                  // 4
+  return drciIsStale(pr);                                                   // 5 / 6
 }
 
 function renderReviews() {
