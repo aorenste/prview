@@ -39,6 +39,12 @@ let showApproved = loadPref('showApproved', false);
 let showRejected = loadPref('showRejected', false);
 let showRead = loadPref('showRead', false);
 let showPassing = loadPref('showPassing', false);
+// Debug: when on, the Needs Attention tab shows every review PR and dims the
+// ones the current filter set would hide, so you can see what's being filtered.
+let debugMode = loadPref('debugMode', false);
+
+// Lucide "bug" icon, inherits the chip's text color via currentColor.
+const BUG_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-4"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/></svg>';
 
 // --- Sort state ---
 function loadSortPref(key, defaultCol, defaultDir) {
@@ -472,6 +478,10 @@ function renderReviews() {
   const readCount = visible.length - unreadCount;
   if (!showRead) visible = visible.filter(p => p.is_mentioned || !p.is_read);
 
+  // In debug mode we render every PR and dim the ones the filters dropped.
+  const visibleSet = new Set(visible.map(prKey));
+  const rowsToRender = debugMode ? allReviewPrs : visible;
+
   const tbody = document.getElementById('reviews-body');
   const bar = document.getElementById('reviews-filter-bar');
 
@@ -501,7 +511,20 @@ function renderReviews() {
     chips.push(`<button class="chip${showPassing ? ' active' : ''}" id="passing-toggle">
       ${showPassing ? 'Only showing' : 'Only show'} passing</button>`);
   }
+  // Debug toggle sits to the left of the selectors. Only worth showing when
+  // there's at least one review PR to dim.
+  if (allReviewPrs.length > 0) {
+    chips.unshift(`<button class="chip debug-toggle${debugMode ? ' active' : ''}" id="debug-toggle" title="Debug: show all review PRs, dimming the ones the filters would hide">${BUG_ICON}</button>`);
+  }
   bar.innerHTML = chips.join('');
+
+  if (allReviewPrs.length > 0) {
+    document.getElementById('debug-toggle').onclick = () => {
+      debugMode = !debugMode;
+      savePref('debugMode', debugMode);
+      renderReviews();
+    };
+  }
 
   if (draftCount > 0) {
     document.getElementById('draft-toggle').onclick = () => {
@@ -544,7 +567,7 @@ function renderReviews() {
   countEl.textContent = unreadCount;
   countEl.classList.toggle('attention', unreadCount > 5);
 
-  if (visible.length === 0) {
+  if (rowsToRender.length === 0) {
     tbody.innerHTML = '<tr><td colspan="10" class="empty-state">' +
       (hasFetched ? 'No review requests' : 'Fetching...') + '</td></tr>';
     return;
@@ -554,6 +577,7 @@ function renderReviews() {
     let cls = [];
     if (pr.is_draft) cls.push('draft-row');
     if (pr.is_read) cls.push('read-row');
+    if (debugMode && !visibleSet.has(prKey(pr))) cls.push('debug-hidden');
     const rowClass = cls.length ? ` class="${cls.join(' ')}"` : '';
     const menuLabel = pr.is_read ? 'Mark unread' : 'Mark read';
     const menuRead = pr.is_read ? 'false' : 'true';
@@ -579,7 +603,7 @@ function renderReviews() {
       </td>
     </tr>`;
   }
-  tbody.innerHTML = visible.map(reviewRow).join('');
+  tbody.innerHTML = rowsToRender.map(reviewRow).join('');
 }
 
 // --- Issues tab ---

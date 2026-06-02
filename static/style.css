@@ -166,6 +166,9 @@
     font-size: 0.9em;
     opacity: 0.7;
   }
+  /* Icon-only debug chip */
+  .chip.debug-toggle { padding: 4px 8px; }
+  .chip.debug-toggle svg { display: block; }
 
   /* Table */
   table { border-collapse: collapse; width: 100%; table-layout: fixed; }
@@ -191,6 +194,10 @@
   tr.hidden-row { opacity: 0.4; }
   tr.draft-row { opacity: 1.0; }
   tr.read-row > td:not(.menu-cell) { opacity: 0.4; }
+  /* Debug mode: a PR the current filters would have hidden. Dimmed, with an
+     accent bar so it's distinguishable from a merely-read row. */
+  tr.debug-hidden { opacity: 0.4; }
+  tr.debug-hidden > td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
   tbody tr:last-child td { border-bottom: none; }
 
   /* Links */

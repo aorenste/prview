@@ -50,6 +50,11 @@ function rowKeys(win) {
     .map(tr => tr.getAttribute('data-key'));
 }
 
+function dimmedKeys(win) {
+  return Array.from(win.document.querySelectorAll('#reviews-body tr.debug-hidden'))
+    .map(tr => tr.getAttribute('data-key'));
+}
+
 test('approved PR with a pending review request stays hidden (not mentioned)', () => {
   // Real-world repro: PR #175453 — approved by someone else, you have a
   // pending review request but never reviewed it, and you are not mentioned.
@@ -257,4 +262,48 @@ test('CI-approval-needed PR stays visible past the approved hide', () => {
   })]);
   assert.ok(rowKeys(win).includes('pytorch/pytorch#11'),
     'a PR needing CI approval should override the approved hide');
+});
+
+// --- Debug mode ---
+// When on, every review PR renders and the ones the filters would hide are
+// dimmed (class debug-hidden) instead of removed.
+
+test('debug off: filtered-out PRs are removed (default)', () => {
+  const win = loadApp();
+  feedReviews(win, [
+    reviewPr({ number: 1, review_status: '' }),            // visible
+    reviewPr({ number: 2, review_status: 'APPROVED' }),    // hidden by default
+  ]);
+  assert.deepStrictEqual(rowKeys(win), ['pytorch/pytorch#1']);
+  assert.deepStrictEqual(dimmedKeys(win), []);
+});
+
+test('debug on: all PRs render; filtered-out ones are dimmed', () => {
+  const win = loadApp({ prefs: { debugMode: true } });
+  feedReviews(win, [
+    reviewPr({ number: 1, review_status: '' }),            // would stay visible
+    reviewPr({ number: 2, review_status: 'APPROVED' }),    // would be hidden
+  ]);
+  // Both rows present...
+  assert.deepStrictEqual(rowKeys(win).sort(),
+    ['pytorch/pytorch#1', 'pytorch/pytorch#2']);
+  // ...but only the filtered-out one is dimmed.
+  assert.deepStrictEqual(dimmedKeys(win), ['pytorch/pytorch#2']);
+});
+
+test('debug on: a PR an override keeps visible is not dimmed', () => {
+  // CI-approval overrides the approved hide, so it stays a "real" visible row.
+  const win = loadApp({ prefs: { debugMode: true } });
+  feedReviews(win, [
+    reviewPr({ number: 11, review_status: 'APPROVED', ci_approval_needed: true }),
+  ]);
+  assert.deepStrictEqual(rowKeys(win), ['pytorch/pytorch#11']);
+  assert.deepStrictEqual(dimmedKeys(win), []);
+});
+
+test('debug toggle button is present when there are review PRs', () => {
+  const win = loadApp();
+  feedReviews(win, [reviewPr({ number: 1 })]);
+  assert.ok(win.document.getElementById('debug-toggle'),
+    'the bug-icon debug toggle should render in the filter bar');
 });
