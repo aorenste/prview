@@ -57,10 +57,13 @@ pub async fn fetch_prs_loop(
     gh_user: Arc<String>,
 ) {
     loop {
-        nudge.store(false, Ordering::Relaxed);
+        // A pending nudge means this iteration was triggered by a manual
+        // refresh; force a full re-check (e.g. CI-approval) rather than relying
+        // on updated_at having changed. Clears the flag for this run.
+        let force = nudge.swap(false, Ordering::Relaxed);
         let user = gh_user.as_str();
 
-        match fetch_and_store(&db, &tx, user).await {
+        match fetch_and_store(&db, &tx, user, force).await {
             Ok((my_count, review_count)) => {
                 log!("[{}] Fetched {} open PRs, {} review-requested PRs",
                     user, my_count, review_count);
@@ -232,10 +235,27 @@ pub async fn fetch_details_loop(
     }
 }
 
+/// Whether to re-run the (REST) CI-approval check for a review PR.
+///
+/// Normally we skip PRs whose `updated_at` is unchanged and reuse the stored
+/// value, to avoid an API call per PR every poll. The downside is that
+/// approving CI workflows doesn't bump `updated_at`, so a cleared CI-approval
+/// can stay stale. A manual refresh passes `force` to re-check everything.
+fn should_recheck_ci_approval(old_updated_at: Option<&str>, new_updated_at: &str, force: bool) -> bool {
+    if force {
+        return true;
+    }
+    match old_updated_at {
+        Some(old) => old != new_updated_at, // re-check only if the PR actually changed
+        None => true,                       // never seen before — must check
+    }
+}
+
 async fn fetch_and_store(
     db: &Arc<Mutex<Connection>>,
     tx: &broadcast::Sender<UpdateBatch>,
     user: &str,
+    force: bool,
 ) -> Result<(usize, usize), Box<dyn std::error::Error + Send + Sync>> {
     // Snapshot old state
     let old_prs: HashMap<(String, i64), db::PrRow> = {
@@ -266,18 +286,17 @@ async fn fetch_and_store(
     let review_count = result.review_prs.len();
     let label = if user.is_empty() { "@me" } else { user };
 
-    // Check CI approval only for review PRs whose updated_at changed
+    // Check CI approval for review PRs whose updated_at changed (or all of them
+    // on a forced manual refresh). Unchanged PRs reuse the stored value.
     let mut ci_check_indices = Vec::new();
     for (i, pr) in result.review_prs.iter_mut().enumerate() {
         let key = (pr.repo.clone(), pr.number);
-        if let Some(old) = old_reviews.get(&key) {
-            if old.updated_at == pr.updated_at {
-                // Unchanged — preserve old ci_approval_needed value
+        match old_reviews.get(&key) {
+            Some(old) if !should_recheck_ci_approval(Some(&old.updated_at), &pr.updated_at, force) => {
                 pr.ci_approval_needed = old.ci_approval_needed;
-                continue;
             }
+            _ => ci_check_indices.push(i),
         }
-        ci_check_indices.push(i);
     }
     if !ci_check_indices.is_empty() {
         let futures: Vec<_> = ci_check_indices.iter()
@@ -291,8 +310,9 @@ async fn fetch_and_store(
         for (&idx, needed) in ci_check_indices.iter().zip(results) {
             result.review_prs[idx].ci_approval_needed = needed;
         }
-        log!("[{}] Checked CI approval for {} changed review PRs (of {})",
-            label, ci_check_indices.len(), review_count);
+        log!("[{}] Checked CI approval for {} review PRs (of {}){}",
+            label, ci_check_indices.len(), review_count,
+            if force { " [forced]" } else { "" });
     }
 
     // Upsert: never delete a row just because it's missing from a search
@@ -503,5 +523,27 @@ mod tests {
         let closed = HashSet::new();
         let missing = review_prs_needing_verification(&old, &fetched, &closed);
         assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn ci_approval_skipped_when_unchanged_and_not_forced() {
+        assert!(!should_recheck_ci_approval(Some("t1"), "t1", false));
+    }
+
+    #[test]
+    fn ci_approval_rechecked_when_updated_at_changed() {
+        assert!(should_recheck_ci_approval(Some("t1"), "t2", false));
+    }
+
+    #[test]
+    fn ci_approval_rechecked_for_new_pr() {
+        assert!(should_recheck_ci_approval(None, "t1", false));
+    }
+
+    #[test]
+    fn ci_approval_forced_rechecks_even_when_unchanged() {
+        // Manual refresh: re-check regardless of updated_at so a cleared
+        // CI-approval is noticed promptly.
+        assert!(should_recheck_ci_approval(Some("t1"), "t1", true));
     }
 }
