@@ -717,18 +717,30 @@ fn extract_new_commit_since_review(pr: &GqlPr, user: &str) -> bool {
     }
 }
 
-/// True if `user` is in the PR's pending review-request list. GitHub keeps a
-/// requested reviewer here until they submit a fresh review, even when their
-/// previous review still drives reviewDecision (e.g. a stale CHANGES_REQUESTED).
+/// True if `user`'s review was *re*-requested: they're in the PR's pending
+/// review-request list AND they have already submitted a review on it. GitHub
+/// keeps a requested reviewer here until they submit a fresh review, even when
+/// their previous review still drives reviewDecision (e.g. a stale
+/// CHANGES_REQUESTED). Requiring a prior review distinguishes that from a
+/// first-time request (which isn't a re-review and shouldn't bypass the
+/// changes-requested hide).
 fn extract_re_review_requested(pr: &GqlPr, user: &str) -> bool {
     if user.is_empty() {
         return false;
     }
-    pr.review_requests.nodes.iter().any(|req| {
+    let requested = pr.review_requests.nodes.iter().any(|req| {
         req.requested_reviewer
             .as_ref()
             .and_then(|r| r.login.as_deref())
             .is_some_and(|login| login.eq_ignore_ascii_case(user))
+    });
+    if !requested {
+        return false;
+    }
+    // Only a re-review if you've actually reviewed before (any submitted review;
+    // a not-yet-submitted PENDING one doesn't count).
+    pr.reviews.nodes.iter().any(|r| {
+        r.author.login.eq_ignore_ascii_case(user) && r.state != "PENDING"
     })
 }
 
@@ -1668,6 +1680,20 @@ mod tests {
         pr
     }
 
+    // Attach prior reviews (by login) to a PR — used to distinguish a genuine
+    // re-review from a first-time review request.
+    fn with_reviewers(mut pr: GqlPr, logins: &[&str]) -> GqlPr {
+        pr.reviews = GqlNodes {
+            nodes: logins.iter().map(|l| GqlReview {
+                author: GqlAuthor { login: l.to_string() },
+                state: "COMMENTED".to_string(),
+                commit: None,
+            }).collect(),
+            total_count: None,
+        };
+        pr
+    }
+
     // Build a PR with a head commit `head` and a set of (login, state, reviewed_oid)
     // reviews, for testing extract_new_commit_since_review.
     fn pr_with_reviews(head: &str, reviews: &[(&str, &str, &str)]) -> GqlPr {
@@ -1757,15 +1783,38 @@ mod tests {
     }
 
     #[test]
+    fn no_re_review_for_first_time_request() {
+        // Repro for #186104: you're in the pending review-request list but have
+        // never reviewed the PR. That's a first-time request, not a re-review.
+        let pr = pr_with_review_requests(&[Some("aorenste")]);
+        assert!(!extract_re_review_requested(&pr, "aorenste"));
+    }
+
+    #[test]
     fn re_review_requested_when_user_in_requests() {
-        let pr = pr_with_review_requests(&[Some("zou3519"), Some("aorenste")]);
+        let pr = with_reviewers(
+            pr_with_review_requests(&[Some("zou3519"), Some("aorenste")]),
+            &["aorenste"],
+        );
         assert!(extract_re_review_requested(&pr, "aorenste"));
     }
 
     #[test]
     fn re_review_requested_is_case_insensitive() {
-        let pr = pr_with_review_requests(&[Some("AOrenste")]);
+        // Case-insensitive on both the request match and the prior-review match.
+        let pr = with_reviewers(pr_with_review_requests(&[Some("AOrenste")]), &["AORENSTE"]);
         assert!(extract_re_review_requested(&pr, "aorenste"));
+    }
+
+    #[test]
+    fn no_re_review_when_requested_but_only_others_reviewed() {
+        // In the request list, but the only prior reviews are from other people
+        // (the #186104 shape: kqfu/zou3519 reviewed, you didn't).
+        let pr = with_reviewers(
+            pr_with_review_requests(&[Some("aorenste")]),
+            &["kqfu", "zou3519"],
+        );
+        assert!(!extract_re_review_requested(&pr, "aorenste"));
     }
 
     #[test]
@@ -1795,7 +1844,7 @@ mod tests {
 
     #[test]
     fn re_review_propagates_through_convert_prs() {
-        let pr = pr_with_review_requests(&[Some("aorenste")]);
+        let pr = with_reviewers(pr_with_review_requests(&[Some("aorenste")]), &["aorenste"]);
         let inserts = convert_prs(std::slice::from_ref(&pr), "aorenste");
         assert!(inserts[0].re_review_requested);
     }
