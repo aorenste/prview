@@ -307,3 +307,49 @@ test('debug toggle button is present when there are review PRs', () => {
   assert.ok(win.document.getElementById('debug-toggle'),
     'the bug-icon debug toggle should render in the filter bar');
 });
+
+// --- Hide-by-author (jansel) ---
+// A "Hide N from jansel" toggle, default off. When on, mutes that author.
+
+test('hide-author off (default): jansel PRs show', () => {
+  const win = loadApp();
+  feedReviews(win, [
+    reviewPr({ number: 1, author: 'jansel' }),
+    reviewPr({ number: 2, author: 'someone' }),
+  ]);
+  assert.deepStrictEqual(rowKeys(win).sort(),
+    ['pytorch/pytorch#1', 'pytorch/pytorch#2']);
+});
+
+test('hide-author on: jansel PRs are hidden, others stay', () => {
+  const win = loadApp({ prefs: { hideAuthor: true } });
+  feedReviews(win, [
+    reviewPr({ number: 1, author: 'jansel' }),
+    reviewPr({ number: 2, author: 'someone' }),
+  ]);
+  assert.deepStrictEqual(rowKeys(win), ['pytorch/pytorch#2']);
+});
+
+test('hide-author on: a mention does NOT override the author mute', () => {
+  const win = loadApp({ prefs: { hideAuthor: true } });
+  feedReviews(win, [reviewPr({ number: 1, author: 'jansel', is_mentioned: true })]);
+  assert.deepStrictEqual(rowKeys(win), []);
+});
+
+test('debug on + hide-author on: jansel PR renders but dimmed', () => {
+  const win = loadApp({ prefs: { hideAuthor: true, debugMode: true } });
+  feedReviews(win, [
+    reviewPr({ number: 1, author: 'jansel' }),
+    reviewPr({ number: 2, author: 'someone' }),
+  ]);
+  assert.deepStrictEqual(rowKeys(win).sort(),
+    ['pytorch/pytorch#1', 'pytorch/pytorch#2']);
+  assert.deepStrictEqual(dimmedKeys(win), ['pytorch/pytorch#1']);
+});
+
+test('hide-author chip is present when that author has a PR', () => {
+  const win = loadApp();
+  feedReviews(win, [reviewPr({ number: 1, author: 'jansel' })]);
+  assert.ok(win.document.getElementById('hide-author-toggle'),
+    'the hide-author toggle should render when the author has a review PR');
+});

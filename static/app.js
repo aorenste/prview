@@ -42,6 +42,9 @@ let showPassing = loadPref('showPassing', false);
 // Debug: when on, the Needs Attention tab shows every review PR and dims the
 // ones the current filter set would hide, so you can see what's being filtered.
 let debugMode = loadPref('debugMode', false);
+// When on, hide review PRs authored by HIDE_AUTHOR. Default off.
+const HIDE_AUTHOR = 'jansel';
+let hideAuthor = loadPref('hideAuthor', false);
 
 // Lucide "bug" icon, inherits the chip's text color via currentColor.
 const BUG_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-4"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/></svg>';
@@ -472,6 +475,8 @@ function renderReviews() {
   if (!showApproved) visible = visible.filter(p => action(p) || p.review_status !== 'APPROVED');
   if (!showRejected) visible = visible.filter(p => stays(p) || p.review_status !== 'CHANGES_REQUESTED');
   if (showPassing) visible = visible.filter(p => action(p) || isCiPassing(p));
+  // Author mute: a hard hide (no mention/action override).
+  if (hideAuthor) visible = visible.filter(p => p.author !== HIDE_AUTHOR);
 
   // Count read items before applying read filter (for tab badge and chip)
   const unreadCount = visible.filter(p => !p.is_read).length;
@@ -489,6 +494,7 @@ function renderReviews() {
   const approvedCount = allReviewPrs.filter(p => p.review_status === 'APPROVED').length;
   const rejectedCount = allReviewPrs.filter(p => p.review_status === 'CHANGES_REQUESTED').length;
   const nonPassingCount = allReviewPrs.filter(p => !isCiPassing(p)).length;
+  const hideAuthorCount = allReviewPrs.filter(p => p.author === HIDE_AUTHOR).length;
 
   let chips = [];
   if (draftCount > 0) {
@@ -510,6 +516,10 @@ function renderReviews() {
   if (nonPassingCount > 0 || showPassing) {
     chips.push(`<button class="chip${showPassing ? ' active' : ''}" id="passing-toggle">
       ${showPassing ? 'Only showing' : 'Only show'} passing</button>`);
+  }
+  if (hideAuthorCount > 0) {
+    chips.push(`<button class="chip${hideAuthor ? ' active' : ''}" id="hide-author-toggle">
+      ${hideAuthor ? 'Hiding' : 'Hide'} ${hideAuthorCount} from ${HIDE_AUTHOR}</button>`);
   }
   // Debug toggle sits to the left of the selectors. Only worth showing when
   // there's at least one review PR to dim.
@@ -558,6 +568,13 @@ function renderReviews() {
     document.getElementById('passing-toggle').onclick = () => {
       showPassing = !showPassing;
       savePref('showPassing', showPassing);
+      renderReviews();
+    };
+  }
+  if (hideAuthorCount > 0) {
+    document.getElementById('hide-author-toggle').onclick = () => {
+      hideAuthor = !hideAuthor;
+      savePref('hideAuthor', hideAuthor);
       renderReviews();
     };
   }
