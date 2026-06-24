@@ -65,7 +65,12 @@ pub fn init_client(proxy: Option<&str>) {
     CLIENT.get_or_init(|| {
         let (token, source) = resolve_token().expect("Could not find GitHub token. Set GITHUB_TOKEN env var or authenticate with `gh auth login`.");
         log!("GitHub token from {}", source);
-        let mut builder = Client::builder().user_agent("prview");
+        // Per-request timeouts so a hung connection can't wedge a fetch loop
+        // indefinitely (it'll error, get logged, and retry next cycle).
+        let mut builder = Client::builder()
+            .user_agent("prview")
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(45));
         if let Some(proxy_url) = proxy {
             log!("Using proxy: {}", proxy_url);
             builder = builder.proxy(

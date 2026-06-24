@@ -942,12 +942,31 @@ pub struct PrDetailUpdate {
     pub mention_count: i64,
 }
 
+/// Overall CI state derived from the detailed check counts, mirroring GitHub's
+/// rollup precedence (failure > pending > success). The detail loop writes this
+/// so checks_overall doesn't stay frozen at 'PENDING' (which would make the
+/// stale gate re-fetch the PR forever) while waiting on the light query.
+/// Returns "" when there are no checks to judge (caller leaves the column as-is).
+fn derive_checks_overall(d: &PrDetailUpdate) -> &'static str {
+    if d.checks_fail > 0 {
+        "FAILURE"
+    } else if d.checks_pending > 0 {
+        "PENDING"
+    } else if d.checks_success > 0 {
+        "SUCCESS"
+    } else {
+        ""
+    }
+}
+
 pub fn update_pr_details(conn: &Connection, repo: &str, number: i64, user: &str, d: &PrDetailUpdate) {
+    let total = d.checks_success + d.checks_fail + d.checks_pending;
     conn.execute(
         "UPDATE prs SET
             checks_success = ?1, checks_fail = ?2, checks_pending = ?3, checks_running = ?4,
             drci_emoji = ?5, drci_status = ?6, landing_status = ?7,
             checks_queued = ?8,
+            checks_overall = CASE WHEN ?13 > 0 THEN ?12 ELSE checks_overall END,
             detail_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
             detail_for_updated_at = updated_at
          WHERE target_user = ?9 AND repo = ?10 AND number = ?11",
@@ -956,6 +975,7 @@ pub fn update_pr_details(conn: &Connection, repo: &str, number: i64, user: &str,
             d.drci_emoji, d.drci_status, d.landing_status,
             d.checks_queued,
             user, repo, number,
+            derive_checks_overall(d), total,
         ],
     ).ok();
 }
@@ -973,6 +993,7 @@ pub fn update_review_pr_details(conn: &Connection, repo: &str, number: i64, user
             mention_count = ?7,
             checks_queued = ?8,
             drci_updated_at = ?12,
+            checks_overall = CASE WHEN ?14 > 0 THEN ?13 ELSE checks_overall END,
             detail_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
             detail_for_updated_at = updated_at
          WHERE target_user = ?9 AND repo = ?10 AND number = ?11",
@@ -982,6 +1003,7 @@ pub fn update_review_pr_details(conn: &Connection, repo: &str, number: i64, user
             d.checks_queued,
             user, repo, number,
             d.drci_updated_at,
+            derive_checks_overall(d), d.checks_success + d.checks_fail + d.checks_pending,
         ],
     ).ok();
 }
@@ -1302,6 +1324,32 @@ mod tests {
         let stale = list_stale_review_prs(&conn, "me", 60);
         let row = stale.iter().find(|(_, n, _)| *n == 1).expect("never-fetched PR is stale");
         assert_eq!(row.2, "never-fetched");
+    }
+
+    #[test]
+    fn detail_update_sets_checks_overall_from_counts() {
+        // A row stuck at checks_overall='PENDING' must get corrected by the detail
+        // loop itself (failure > pending > success), so the stale gate stops
+        // re-fetching it even if the light query hasn't refreshed it.
+        let conn = test_db();
+        insert_review_pr(&conn, 1, "2020-01-01T00:00:00Z", "PENDING");
+        let d = PrDetailUpdate {
+            checks_success: 5, checks_fail: 2, checks_pending: 0, checks_queued: 0,
+            checks_running: false, drci_emoji: String::new(), drci_status: String::new(),
+            drci_updated_at: String::new(), landing_status: String::new(), mention_count: 0,
+        };
+        update_review_pr_details(&conn, "pytorch/pytorch", 1, "me", &d);
+        assert_eq!(get_review_pr(&conn, "pytorch/pytorch", 1, "me").unwrap().checks_overall, "FAILURE");
+    }
+
+    #[test]
+    fn detail_update_keeps_checks_overall_when_no_counts() {
+        // An empty detail fetch (0 contexts — possibly a glitch) must not wipe a
+        // known checks_overall to ''.
+        let conn = test_db();
+        insert_review_pr(&conn, 2, "2020-01-01T00:00:00Z", "SUCCESS");
+        update_review_pr_details(&conn, "pytorch/pytorch", 2, "me", &detail(0));
+        assert_eq!(get_review_pr(&conn, "pytorch/pytorch", 2, "me").unwrap().checks_overall, "SUCCESS");
     }
 
     #[test]
