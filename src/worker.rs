@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use rusqlite::Connection;
 use tokio::sync::broadcast;
@@ -63,10 +64,14 @@ pub async fn fetch_prs_loop(
         let force = nudge.swap(false, Ordering::Relaxed);
         let user = gh_user.as_str();
 
+        // Cycle-start marker + duration: a "starting" with no matching "Fetched"
+        // means the loop wedged mid-cycle (e.g. a hung request).
+        log!("[{}] Fetch cycle starting{}", user, if force { " (forced)" } else { "" });
+        let started = Instant::now();
         match fetch_and_store(&db, &tx, user, force).await {
             Ok((my_count, review_count)) => {
-                log!("[{}] Fetched {} open PRs, {} review-requested PRs",
-                    user, my_count, review_count);
+                log!("[{}] Fetched {} open PRs, {} review-requested PRs in {:.1}s",
+                    user, my_count, review_count, started.elapsed().as_secs_f64());
             }
             Err(e) => {
                 log!("[{}] Error fetching PRs: {}", user, e);
@@ -108,6 +113,10 @@ pub async fn fetch_details_loop(
     tx: broadcast::Sender<UpdateBatch>,
     gh_user: Arc<String>,
 ) {
+    // Consecutive cycles each PR has been re-selected for a detail fetch. Used
+    // to warn about a PR that never stops being stale (e.g. a frozen
+    // checks_overall='PENDING' the main loop isn't refreshing).
+    let mut refetch_streak: HashMap<(String, i64), u32> = HashMap::new();
     loop {
         let user = gh_user.as_str();
         let label = user;
@@ -129,23 +138,48 @@ pub async fn fetch_details_loop(
             let mut is_my_pr: std::collections::HashSet<(String, i64)> = std::collections::HashSet::new();
             let mut is_review_pr: std::collections::HashSet<(String, i64)> = std::collections::HashSet::new();
 
-            for (repo, number) in &stale_prs {
+            // Why each PR was selected (never-fetched / updated / ci-pending),
+            // for logging.
+            let mut reasons: HashMap<(String, i64), String> = HashMap::new();
+
+            for (repo, number, reason) in &stale_prs {
                 by_repo.entry(repo.clone()).or_default().push((*number, true));
                 is_my_pr.insert((repo.clone(), *number));
+                reasons.insert((repo.clone(), *number), reason.clone());
             }
-            for (repo, number) in &stale_reviews {
+            for (repo, number, reason) in &stale_reviews {
                 let entry = by_repo.entry(repo.clone()).or_default();
                 if !entry.iter().any(|(n, _)| *n == *number) {
                     entry.push((*number, false));
                 }
                 is_review_pr.insert((repo.clone(), *number));
+                reasons.entry((repo.clone(), *number)).or_insert_with(|| reason.clone());
+            }
+
+            // Loop detector: bump a streak for every PR selected this cycle, reset
+            // for those that dropped out, and warn when one keeps getting picked.
+            let selected: std::collections::HashSet<(String, i64)> =
+                reasons.keys().cloned().collect();
+            refetch_streak.retain(|k, _| selected.contains(k));
+            for key in &selected {
+                let streak = refetch_streak.entry(key.clone()).or_insert(0);
+                *streak += 1;
+                if *streak == 10 || (*streak > 10 && *streak % 30 == 0) {
+                    let reason = reasons.get(key).map(|s| s.as_str()).unwrap_or("?");
+                    log!("[{}] WARNING: {}#{} re-fetched {} cycles running (reason: {}) — \
+                          main loop may be stale or this PR's detail fetch keeps failing",
+                        label, key.0, key.1, *streak, reason);
+                }
             }
 
             for (repo, prs) in &by_repo {
                 // Process in chunks of DETAIL_BATCH_SIZE
                 for chunk in prs.chunks(github::DETAIL_BATCH_SIZE) {
-                    let nums: Vec<i64> = chunk.iter().map(|(n, _)| *n).collect();
-                    log!("[{}] Detail batch: {} {:?}", label, repo, nums);
+                    let nums: Vec<String> = chunk.iter().map(|(n, _)| {
+                        let reason = reasons.get(&(repo.clone(), *n)).map(|s| s.as_str()).unwrap_or("?");
+                        format!("{}({})", n, reason)
+                    }).collect();
+                    log!("[{}] Detail batch: {} [{}]", label, repo, nums.join(", "));
 
                     match github::fetch_pr_details_batch(repo, chunk, &mention_user).await {
                         Ok((results, needs_pagination)) => {
@@ -186,7 +220,15 @@ pub async fn fetch_details_loop(
 
                             // Fall back to individual fetches for PRs needing pagination
                             for (number, include_landing) in &needs_pagination {
-                                if let Ok(details) = github::fetch_pr_details(repo, *number, *include_landing, &mention_user).await {
+                                let details = match github::fetch_pr_details(repo, *number, *include_landing, &mention_user).await {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        log!("[{}] Detail pagination failed for {}#{}: {} (will retry next cycle)",
+                                            label, repo, number, e);
+                                        continue;
+                                    }
+                                };
+                                {
                                     let conn = db.lock().unwrap();
                                     if is_my_pr.contains(&(repo.clone(), *number)) {
                                         db::update_pr_details(&conn, repo, *number, user, &details);

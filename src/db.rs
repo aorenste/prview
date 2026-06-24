@@ -887,16 +887,20 @@ pub fn get_review_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> 
 /// finishing) don't bump the PR's updated_at, so without it a frozen updated_at
 /// would leave the CI pill stuck on "pending" forever. checks_overall is the
 /// rollup state, refreshed on every poll by the light query.
-pub fn list_stale_prs(conn: &Connection, user: &str, max_age_secs: i64) -> Vec<(String, i64)> {
+pub fn list_stale_prs(conn: &Connection, user: &str, max_age_secs: i64) -> Vec<(String, i64, String)> {
     let mut stmt = conn.prepare(
-        "SELECT repo, number FROM prs
+        "SELECT repo, number,
+                CASE WHEN detail_updated_at = '' THEN 'never-fetched'
+                     WHEN detail_for_updated_at != updated_at THEN 'updated'
+                     ELSE 'ci-pending' END
+         FROM prs
          WHERE target_user = ?1 AND hidden = 0
            AND (detail_updated_at = ''
                 OR ((strftime('%s','now') - strftime('%s', detail_updated_at)) > ?2
                     AND (detail_for_updated_at != updated_at OR checks_overall = 'PENDING')))"
     ).unwrap();
     stmt.query_map(rusqlite::params![user, max_age_secs], |row| {
-        Ok((row.get(0)?, row.get(1)?))
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
     })
     .unwrap()
     .filter_map(|r| r.ok())
@@ -905,16 +909,20 @@ pub fn list_stale_prs(conn: &Connection, user: &str, max_age_secs: i64) -> Vec<(
 
 /// Returns review PRs whose details need refreshing. See `list_stale_prs` for
 /// why a still-pending CI rollup forces a refresh independent of updated_at.
-pub fn list_stale_review_prs(conn: &Connection, user: &str, max_age_secs: i64) -> Vec<(String, i64)> {
+pub fn list_stale_review_prs(conn: &Connection, user: &str, max_age_secs: i64) -> Vec<(String, i64, String)> {
     let mut stmt = conn.prepare(
-        "SELECT repo, number FROM review_prs
+        "SELECT repo, number,
+                CASE WHEN detail_updated_at = '' THEN 'never-fetched'
+                     WHEN detail_for_updated_at != updated_at THEN 'updated'
+                     ELSE 'ci-pending' END
+         FROM review_prs
          WHERE target_user = ?1
            AND (detail_updated_at = ''
                 OR ((strftime('%s','now') - strftime('%s', detail_updated_at)) > ?2
                     AND (detail_for_updated_at != updated_at OR checks_overall = 'PENDING')))"
     ).unwrap();
     stmt.query_map(rusqlite::params![user, max_age_secs], |row| {
-        Ok((row.get(0)?, row.get(1)?))
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
     })
     .unwrap()
     .filter_map(|r| r.ok())
@@ -1282,10 +1290,18 @@ mod tests {
         insert_review_pr(&conn, 176044, "2020-01-01T00:00:00Z", "PENDING");
 
         let stale = list_stale_review_prs(&conn, "me", 60);
-        assert!(
-            stale.iter().any(|(_, n)| *n == 176044),
-            "a PR with a still-pending CI rollup should be refetched even when updated_at is frozen"
-        );
+        let row = stale.iter().find(|(_, n, _)| *n == 176044)
+            .expect("a PR with a still-pending CI rollup should be refetched even when updated_at is frozen");
+        assert_eq!(row.2, "ci-pending", "reason should reflect the still-pending rollup");
+    }
+
+    #[test]
+    fn stale_reason_never_fetched() {
+        let conn = test_db();
+        insert_review_pr(&conn, 1, "", "");
+        let stale = list_stale_review_prs(&conn, "me", 60);
+        let row = stale.iter().find(|(_, n, _)| *n == 1).expect("never-fetched PR is stale");
+        assert_eq!(row.2, "never-fetched");
     }
 
     #[test]
@@ -1297,7 +1313,7 @@ mod tests {
 
         let stale = list_stale_review_prs(&conn, "me", 60);
         assert!(
-            !stale.iter().any(|(_, n)| *n == 200),
+            !stale.iter().any(|(_, n, _)| *n == 200),
             "a settled PR with unchanged updated_at should not be refetched"
         );
     }
@@ -1313,7 +1329,7 @@ mod tests {
         // max_age so the age check is definitely not exceeded.
         let stale = list_stale_review_prs(&conn, "me", 10_000_000_000);
         assert!(
-            !stale.iter().any(|(_, n)| *n == 300),
+            !stale.iter().any(|(_, n, _)| *n == 300),
             "a recently-fetched PR should not be refetched until max_age elapses"
         );
     }
