@@ -89,6 +89,30 @@ test('changes-requested PR with a re-review request stays visible', () => {
   );
 });
 
+test('draft + re-review request stays hidden when Show drafts is off', () => {
+  // Repro for #181125: you reviewed it before and are re-requested, but it's a
+  // draft — a draft isn't reviewable, so the draft hide should win.
+  const win = loadApp();
+  feedReviews(win, [reviewPr({
+    number: 181125,
+    is_draft: true,
+    re_review_requested: true,
+  })]);
+
+  assert.ok(
+    !rowKeys(win).includes('pytorch/pytorch#181125'),
+    'a draft should stay hidden even when a re-review was requested'
+  );
+});
+
+test('draft + mention still shows when Show drafts is off', () => {
+  // A direct @-mention is a strong enough signal to surface even a draft.
+  const win = loadApp();
+  feedReviews(win, [reviewPr({ number: 1, is_draft: true, is_mentioned: true })]);
+  assert.ok(rowKeys(win).includes('pytorch/pytorch#1'),
+    'a mention should still surface a draft');
+});
+
 test('approved PR you were mentioned in stays visible', () => {
   const win = loadApp();
   feedReviews(win, [reviewPr({

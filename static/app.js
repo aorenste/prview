@@ -471,7 +471,9 @@ function renderReviews() {
   const action = p => p.is_mentioned || p.ci_approval_needed;
   const stays = p => action(p) || p.re_review_requested;
   let visible = allReviewPrs;
-  if (!showDrafts) visible = visible.filter(p => stays(p) || !p.is_draft);
+  // Drafts: a re-review request does NOT override the draft hide — a draft isn't
+  // reviewable yet. Only an action signal (mention / CI approval) surfaces one.
+  if (!showDrafts) visible = visible.filter(p => action(p) || !p.is_draft);
   if (!showApproved) visible = visible.filter(p => action(p) || p.review_status !== 'APPROVED');
   if (!showRejected) visible = visible.filter(p => stays(p) || p.review_status !== 'CHANGES_REQUESTED');
   if (showPassing) visible = visible.filter(p => action(p) || isCiPassing(p));
