@@ -123,12 +123,14 @@ pub async fn fetch_details_loop(
         let mention_user = user;
 
         {
-            // Collect PRs whose details haven't been fetched in the last 60s
+            // Refresh details for changed PRs, and once when CI settles (see
+            // list_stale_prs). Still-running PRs are NOT re-polled.
+            const STALE_MAX_AGE: i64 = 60;
             let (stale_prs, stale_reviews) = {
                 let conn = db.lock().unwrap();
                 (
-                    db::list_stale_prs(&conn, user, 60),
-                    db::list_stale_review_prs(&conn, user, 60),
+                    db::list_stale_prs(&conn, user, STALE_MAX_AGE),
+                    db::list_stale_review_prs(&conn, user, STALE_MAX_AGE),
                 )
             };
 

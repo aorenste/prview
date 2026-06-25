@@ -881,23 +881,30 @@ pub fn get_review_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> 
     .ok()
 }
 
-/// Returns PRs whose details need refreshing: either never fetched, or fetched
-/// >max_age_secs ago AND (updated_at changed since OR CI is still pending).
-/// The CI-pending clause matters because check-run transitions (and CI finally
-/// finishing) don't bump the PR's updated_at, so without it a frozen updated_at
-/// would leave the CI pill stuck on "pending" forever. checks_overall is the
-/// rollup state, refreshed on every poll by the light query.
+/// Returns PRs whose details need refreshing, each with a reason. We do NOT
+/// re-poll a PR while its CI is still running (that wastefully re-paginates huge
+/// pending PRs). Instead we refresh when:
+///   - never fetched, or
+///   - the PR changed (`updated_at` moved — new commit/comment/review), or
+///   - "ci-settled": the rollup is no longer PENDING and nothing is running, yet
+///     the stored breakdown still shows pending checks. That means CI finished
+///     (CI completing doesn't bump updated_at) and the detailed counts are stale
+///     — refetch once to update them. It's self-clearing (after the refetch
+///     checks_pending is 0) so it can't loop. checks_overall/checks_running come
+///     from the light query (fresh every poll); checks_pending from the detail.
 pub fn list_stale_prs(conn: &Connection, user: &str, max_age_secs: i64) -> Vec<(String, i64, String)> {
     let mut stmt = conn.prepare(
         "SELECT repo, number,
                 CASE WHEN detail_updated_at = '' THEN 'never-fetched'
                      WHEN detail_for_updated_at != updated_at THEN 'updated'
-                     ELSE 'ci-pending' END
+                     ELSE 'ci-settled' END
          FROM prs
          WHERE target_user = ?1 AND hidden = 0
            AND (detail_updated_at = ''
-                OR ((strftime('%s','now') - strftime('%s', detail_updated_at)) > ?2
-                    AND (detail_for_updated_at != updated_at OR checks_overall = 'PENDING')))"
+                OR (detail_for_updated_at != updated_at
+                    AND (strftime('%s','now') - strftime('%s', detail_updated_at)) > ?2)
+                OR (checks_overall != 'PENDING' AND checks_running = 0 AND checks_pending > 0
+                    AND (strftime('%s','now') - strftime('%s', detail_updated_at)) > ?2))"
     ).unwrap();
     stmt.query_map(rusqlite::params![user, max_age_secs], |row| {
         Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -908,18 +915,20 @@ pub fn list_stale_prs(conn: &Connection, user: &str, max_age_secs: i64) -> Vec<(
 }
 
 /// Returns review PRs whose details need refreshing. See `list_stale_prs` for
-/// why a still-pending CI rollup forces a refresh independent of updated_at.
+/// the logic (never-fetched / changed / ci-settled).
 pub fn list_stale_review_prs(conn: &Connection, user: &str, max_age_secs: i64) -> Vec<(String, i64, String)> {
     let mut stmt = conn.prepare(
         "SELECT repo, number,
                 CASE WHEN detail_updated_at = '' THEN 'never-fetched'
                      WHEN detail_for_updated_at != updated_at THEN 'updated'
-                     ELSE 'ci-pending' END
+                     ELSE 'ci-settled' END
          FROM review_prs
          WHERE target_user = ?1
            AND (detail_updated_at = ''
-                OR ((strftime('%s','now') - strftime('%s', detail_updated_at)) > ?2
-                    AND (detail_for_updated_at != updated_at OR checks_overall = 'PENDING')))"
+                OR (detail_for_updated_at != updated_at
+                    AND (strftime('%s','now') - strftime('%s', detail_updated_at)) > ?2)
+                OR (checks_overall != 'PENDING' AND checks_running = 0 AND checks_pending > 0
+                    AND (strftime('%s','now') - strftime('%s', detail_updated_at)) > ?2))"
     ).unwrap();
     stmt.query_map(rusqlite::params![user, max_age_secs], |row| {
         Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -942,31 +951,15 @@ pub struct PrDetailUpdate {
     pub mention_count: i64,
 }
 
-/// Overall CI state derived from the detailed check counts, mirroring GitHub's
-/// rollup precedence (failure > pending > success). The detail loop writes this
-/// so checks_overall doesn't stay frozen at 'PENDING' (which would make the
-/// stale gate re-fetch the PR forever) while waiting on the light query.
-/// Returns "" when there are no checks to judge (caller leaves the column as-is).
-fn derive_checks_overall(d: &PrDetailUpdate) -> &'static str {
-    if d.checks_fail > 0 {
-        "FAILURE"
-    } else if d.checks_pending > 0 {
-        "PENDING"
-    } else if d.checks_success > 0 {
-        "SUCCESS"
-    } else {
-        ""
-    }
-}
-
 pub fn update_pr_details(conn: &Connection, repo: &str, number: i64, user: &str, d: &PrDetailUpdate) {
-    let total = d.checks_success + d.checks_fail + d.checks_pending;
+    // checks_overall is owned solely by the light query (the rollup state); the
+    // detail loop must not write it, or it can disagree with the rollup and
+    // ping-pong with the "rollup changed -> refetch detail" trigger in upsert_*.
     conn.execute(
         "UPDATE prs SET
             checks_success = ?1, checks_fail = ?2, checks_pending = ?3, checks_running = ?4,
             drci_emoji = ?5, drci_status = ?6, landing_status = ?7,
             checks_queued = ?8,
-            checks_overall = CASE WHEN ?13 > 0 THEN ?12 ELSE checks_overall END,
             detail_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
             detail_for_updated_at = updated_at
          WHERE target_user = ?9 AND repo = ?10 AND number = ?11",
@@ -975,7 +968,6 @@ pub fn update_pr_details(conn: &Connection, repo: &str, number: i64, user: &str,
             d.drci_emoji, d.drci_status, d.landing_status,
             d.checks_queued,
             user, repo, number,
-            derive_checks_overall(d), total,
         ],
     ).ok();
 }
@@ -993,7 +985,6 @@ pub fn update_review_pr_details(conn: &Connection, repo: &str, number: i64, user
             mention_count = ?7,
             checks_queued = ?8,
             drci_updated_at = ?12,
-            checks_overall = CASE WHEN ?14 > 0 THEN ?13 ELSE checks_overall END,
             detail_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
             detail_for_updated_at = updated_at
          WHERE target_user = ?9 AND repo = ?10 AND number = ?11",
@@ -1003,7 +994,6 @@ pub fn update_review_pr_details(conn: &Connection, repo: &str, number: i64, user
             d.checks_queued,
             user, repo, number,
             d.drci_updated_at,
-            derive_checks_overall(d), d.checks_success + d.checks_fail + d.checks_pending,
         ],
     ).ok();
 }
@@ -1302,19 +1292,52 @@ mod tests {
         let _ = list_prs(&conn, true, "me");
     }
 
-    #[test]
-    fn stale_review_pr_refetches_while_ci_pending_even_if_updated_at_unchanged() {
-        // Repro for #176044: CI checks transition (and eventually finish) without
-        // bumping the PR's updated_at, so the "updated_at changed" gate alone
-        // freezes the CI pill. While the rollup is still PENDING we must keep
-        // refreshing details regardless.
-        let conn = test_db();
-        insert_review_pr(&conn, 176044, "2020-01-01T00:00:00Z", "PENDING");
+    // Insert a review PR with explicit CI fields for the staleness tests. detail
+    // was fetched long ago (age guard satisfied) and updated_at == detail_for so
+    // the "changed" arm can't fire — isolating the ci-settled logic.
+    fn insert_ci(conn: &Connection, number: i64, checks_overall: &str, running: bool, pending: i64) {
+        conn.execute(
+            "INSERT INTO review_prs
+                (target_user, number, repo, title, url, state, created_at, updated_at,
+                 detail_updated_at, detail_for_updated_at, checks_overall, checks_running, checks_pending)
+             VALUES ('me', ?1, 'pytorch/pytorch', 't', 'u', 'OPEN', '', 'X',
+                     '2020-01-01T00:00:00Z', 'X', ?2, ?3, ?4)",
+            rusqlite::params![number, checks_overall, running as i64, pending],
+        ).unwrap();
+    }
 
+    #[test]
+    fn still_running_pr_not_refetched() {
+        // Genuinely in-flight CI is NOT re-polled (avoids re-paginating huge
+        // pending PRs every cycle — the #184689/#184888 spam).
+        let conn = test_db();
+        insert_ci(&conn, 1, "PENDING", true, 50);   // pending
+        insert_ci(&conn, 2, "FAILURE", true, 5);    // failed early, others still running
         let stale = list_stale_review_prs(&conn, "me", 60);
-        let row = stale.iter().find(|(_, n, _)| *n == 176044)
-            .expect("a PR with a still-pending CI rollup should be refetched even when updated_at is frozen");
-        assert_eq!(row.2, "ci-pending", "reason should reflect the still-pending rollup");
+        assert!(!stale.iter().any(|(_, n, _)| *n == 1), "pending PR should not be re-polled");
+        assert!(!stale.iter().any(|(_, n, _)| *n == 2), "failing-but-running PR should not be re-polled");
+    }
+
+    #[test]
+    fn settled_pr_with_stale_pending_breakdown_is_refetched() {
+        // Repro for "shows Pending when CI is finished" (#187711/#177286): the
+        // rollup is terminal and nothing is running, but the stored breakdown
+        // still shows pending checks — refetch once to fix it.
+        let conn = test_db();
+        insert_ci(&conn, 187711, "FAILURE", false, 3);
+        let stale = list_stale_review_prs(&conn, "me", 60);
+        let row = stale.iter().find(|(_, n, _)| *n == 187711)
+            .expect("a settled PR with a stale pending breakdown should be refetched");
+        assert_eq!(row.2, "ci-settled");
+    }
+
+    #[test]
+    fn settled_pr_with_clean_breakdown_not_refetched() {
+        let conn = test_db();
+        insert_ci(&conn, 1, "SUCCESS", false, 0);
+        let stale = list_stale_review_prs(&conn, "me", 60);
+        assert!(!stale.iter().any(|(_, n, _)| *n == 1),
+            "a settled PR whose breakdown is already clean should not be refetched");
     }
 
     #[test]
@@ -1327,10 +1350,9 @@ mod tests {
     }
 
     #[test]
-    fn detail_update_sets_checks_overall_from_counts() {
-        // A row stuck at checks_overall='PENDING' must get corrected by the detail
-        // loop itself (failure > pending > success), so the stale gate stops
-        // re-fetching it even if the light query hasn't refreshed it.
+    fn detail_update_does_not_touch_checks_overall() {
+        // checks_overall is owned by the light query; the detail loop must leave
+        // it alone (so it can't disagree with the rollup and re-trigger refetch).
         let conn = test_db();
         insert_review_pr(&conn, 1, "2020-01-01T00:00:00Z", "PENDING");
         let d = PrDetailUpdate {
@@ -1339,46 +1361,24 @@ mod tests {
             drci_updated_at: String::new(), landing_status: String::new(), mention_count: 0,
         };
         update_review_pr_details(&conn, "pytorch/pytorch", 1, "me", &d);
-        assert_eq!(get_review_pr(&conn, "pytorch/pytorch", 1, "me").unwrap().checks_overall, "FAILURE");
+        assert_eq!(get_review_pr(&conn, "pytorch/pytorch", 1, "me").unwrap().checks_overall, "PENDING");
     }
 
     #[test]
-    fn detail_update_keeps_checks_overall_when_no_counts() {
-        // An empty detail fetch (0 contexts — possibly a glitch) must not wipe a
-        // known checks_overall to ''.
+    fn recently_fetched_pr_not_refetched_before_max_age() {
+        // The age guard holds: a PR detailed seconds ago isn't refetched even if
+        // its breakdown looks settled-stale.
         let conn = test_db();
-        insert_review_pr(&conn, 2, "2020-01-01T00:00:00Z", "SUCCESS");
-        update_review_pr_details(&conn, "pytorch/pytorch", 2, "me", &detail(0));
-        assert_eq!(get_review_pr(&conn, "pytorch/pytorch", 2, "me").unwrap().checks_overall, "SUCCESS");
-    }
-
-    #[test]
-    fn terminal_ci_pr_not_refetched_when_updated_at_unchanged() {
-        // Counterpart: once CI has settled (rollup SUCCESS) and the PR itself
-        // hasn't changed, there's nothing to refetch.
-        let conn = test_db();
-        insert_review_pr(&conn, 200, "2020-01-01T00:00:00Z", "SUCCESS");
-
+        conn.execute(
+            "INSERT INTO review_prs
+                (target_user, number, repo, title, url, state, created_at, updated_at,
+                 detail_updated_at, detail_for_updated_at, checks_overall, checks_running, checks_pending)
+             VALUES ('me', 1, 'pytorch/pytorch', 't', 'u', 'OPEN', '', 'X',
+                     strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'X', 'FAILURE', 0, 3)",
+            [],
+        ).unwrap();
         let stale = list_stale_review_prs(&conn, "me", 60);
-        assert!(
-            !stale.iter().any(|(_, n, _)| *n == 200),
-            "a settled PR with unchanged updated_at should not be refetched"
-        );
-    }
-
-    #[test]
-    fn recently_fetched_pending_pr_not_refetched_before_max_age() {
-        // Even pending PRs respect max_age — don't hammer details every cycle.
-        let conn = test_db();
-        insert_review_pr(&conn, 300, "2026-06-02T03:00:00Z", "PENDING");
-
-        // 1-hour max_age; detail was fetched at 03:00, "now" is later but the
-        // test only asserts it's excluded when within max_age. Use a huge
-        // max_age so the age check is definitely not exceeded.
-        let stale = list_stale_review_prs(&conn, "me", 10_000_000_000);
-        assert!(
-            !stale.iter().any(|(_, n, _)| *n == 300),
-            "a recently-fetched PR should not be refetched until max_age elapses"
-        );
+        assert!(!stale.iter().any(|(_, n, _)| *n == 1),
+            "a just-fetched PR should not be refetched until max_age elapses");
     }
 }
