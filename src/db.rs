@@ -24,6 +24,10 @@ pub struct PrRow {
     pub checks_queued: i64,
     pub drci_status: String,
     pub drci_emoji: String,
+    /// AI advisor verdict tallies for DrCI's blocking failures, as a JSON blob
+    /// `{"related","not_related","uncertain","pending"}`. Empty when DrCI posted
+    /// no AI verdicts. Lets the UI treat an all-"not related" red DrCI as passing.
+    pub drci_ai_verdict: String,
     pub comment_count: i64,
     pub landing_status: String,
     pub head_sha: String,
@@ -51,6 +55,8 @@ pub struct ReviewPrRow {
     pub checks_queued: i64,
     pub drci_status: String,
     pub drci_emoji: String,
+    /// See `PrRow::drci_ai_verdict`.
+    pub drci_ai_verdict: String,
     pub comment_count: i64,
     pub head_sha: String,
     pub updated_at: String,
@@ -82,6 +88,9 @@ pub struct PrInsert {
     pub checks_running: bool,
     pub drci_status: String,
     pub drci_emoji: String,
+    /// See `PrRow::drci_ai_verdict`. Empty from the light query (it fetches no
+    /// comments); populated by the detail fetch.
+    pub drci_ai_verdict: String,
     pub comment_count: i64,
     pub head_sha: String,
     pub ci_approval_needed: bool,
@@ -360,6 +369,10 @@ const MIGRATIONS: &[&str] = &[
     // used to stick on after a mention was edited/deleted) don't linger. Any
     // genuinely-pending mention still shows via the derived expression.
     "UPDATE review_prs SET is_mentioned = 0",
+    // 23 -> 24: store DrCI's per-failure AI advisor verdict tallies so the UI can
+    // treat an all-"not related" red DrCI as effectively passing.
+    "ALTER TABLE prs ADD COLUMN drci_ai_verdict TEXT NOT NULL DEFAULT '';
+     ALTER TABLE review_prs ADD COLUMN drci_ai_verdict TEXT NOT NULL DEFAULT ''",
 ];
 
 pub fn init_db(path: &Path) -> Connection {
@@ -433,8 +446,8 @@ pub fn upsert_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Result<(),
         "INSERT INTO prs (target_user, number, repo, title, url, state, created_at, updated_at,
                           is_draft, head_ref_name, base_ref_name, head_sha, base_sha,
                           review_status, reviewers, checks_overall, checks_running,
-                          drci_status, drci_emoji, comment_count)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                          drci_status, drci_emoji, comment_count, drci_ai_verdict)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
          ON CONFLICT(target_user, repo, number) DO UPDATE SET
            title = excluded.title,
            url = excluded.url,
@@ -452,7 +465,8 @@ pub fn upsert_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Result<(),
            checks_running = excluded.checks_running,
            drci_status = excluded.drci_status,
            drci_emoji = excluded.drci_emoji,
-           comment_count = excluded.comment_count",
+           comment_count = excluded.comment_count,
+           drci_ai_verdict = excluded.drci_ai_verdict",
     )?;
     for pr in prs {
         stmt.execute(rusqlite::params![
@@ -460,7 +474,7 @@ pub fn upsert_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Result<(),
             pr.number, pr.repo, pr.title, pr.url, pr.state, pr.created_at, pr.updated_at,
             pr.is_draft as i64, pr.head_ref_name, pr.base_ref_name, pr.head_sha, pr.base_sha,
             pr.review_status, pr.reviewers, pr.checks_overall, pr.checks_running as i64,
-            pr.drci_status, pr.drci_emoji, pr.comment_count,
+            pr.drci_status, pr.drci_emoji, pr.comment_count, pr.drci_ai_verdict,
         ])?;
     }
     Ok(())
@@ -479,14 +493,14 @@ pub fn list_prs(conn: &Connection, show_hidden: bool, user: &str) -> Vec<PrRow> 
                 review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count,
                 checks_success, checks_fail, checks_pending, landing_status, head_sha, base_sha,
-                checks_queued
+                checks_queued, drci_ai_verdict
          FROM prs WHERE target_user = ?1 ORDER BY updated_at DESC"
     } else {
         "SELECT repo, number, title, url, updated_at, hidden, is_draft, head_ref_name, base_ref_name,
                 review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count,
                 checks_success, checks_fail, checks_pending, landing_status, head_sha, base_sha,
-                checks_queued
+                checks_queued, drci_ai_verdict
          FROM prs WHERE target_user = ?1 AND hidden = 0 ORDER BY updated_at DESC"
     };
     let mut stmt = conn.prepare(sql).unwrap();
@@ -515,6 +529,7 @@ pub fn list_prs(conn: &Connection, show_hidden: bool, user: &str) -> Vec<PrRow> 
             head_sha: row.get(20)?,
             base_sha: row.get(21)?,
             checks_queued: row.get(22)?,
+            drci_ai_verdict: row.get(23)?,
         })
     })
     .unwrap()
@@ -528,7 +543,7 @@ pub fn get_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> Option<
                 review_status, reviewers, checks_overall, checks_running,
                 drci_status, drci_emoji, comment_count,
                 checks_success, checks_fail, checks_pending, landing_status, head_sha, base_sha,
-                checks_queued
+                checks_queued, drci_ai_verdict
          FROM prs WHERE target_user = ?1 AND repo = ?2 AND number = ?3",
         rusqlite::params![user, repo, number],
         |row| {
@@ -556,6 +571,7 @@ pub fn get_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> Option<
                 head_sha: row.get(20)?,
                 base_sha: row.get(21)?,
                 checks_queued: row.get(22)?,
+                drci_ai_verdict: row.get(23)?,
             })
         },
     )
@@ -590,8 +606,8 @@ pub fn upsert_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Res
                                   author, is_draft, head_ref_name, base_ref_name,
                                   review_status, reviewers, checks_overall, checks_running,
                                   drci_status, drci_emoji, comment_count, head_sha, base_sha,
-                                  ci_approval_needed, re_review_requested)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+                                  ci_approval_needed, re_review_requested, drci_ai_verdict)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
          ON CONFLICT(target_user, repo, number) DO UPDATE SET
            title = excluded.title,
            url = excluded.url,
@@ -608,6 +624,7 @@ pub fn upsert_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Res
            checks_running = excluded.checks_running,
            drci_status = CASE WHEN excluded.drci_status != '' THEN excluded.drci_status ELSE review_prs.drci_status END,
            drci_emoji = CASE WHEN excluded.drci_emoji != '' THEN excluded.drci_emoji ELSE review_prs.drci_emoji END,
+           drci_ai_verdict = CASE WHEN excluded.drci_ai_verdict != '' THEN excluded.drci_ai_verdict ELSE review_prs.drci_ai_verdict END,
            comment_count = excluded.comment_count,
            head_sha = excluded.head_sha,
            base_sha = excluded.base_sha,
@@ -627,7 +644,7 @@ pub fn upsert_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Res
             pr.author, pr.is_draft as i64, pr.head_ref_name, pr.base_ref_name,
             pr.review_status, pr.reviewers, pr.checks_overall, pr.checks_running as i64,
             pr.drci_status, pr.drci_emoji, pr.comment_count, pr.head_sha, pr.base_sha,
-            pr.ci_approval_needed as i64, pr.re_review_requested as i64,
+            pr.ci_approval_needed as i64, pr.re_review_requested as i64, pr.drci_ai_verdict,
         ])?;
     }
 
@@ -747,7 +764,7 @@ pub fn list_review_prs(conn: &Connection, user: &str) -> Vec<ReviewPrRow> {
                 updated_at, ci_approval_needed,
                 checks_success, checks_fail, checks_pending, base_sha,
                 (is_mentioned OR mention_count > last_mention_count),
-                checks_queued, re_review_requested, drci_updated_at
+                checks_queued, re_review_requested, drci_updated_at, drci_ai_verdict
          FROM review_prs WHERE target_user = ?1
          ORDER BY (is_mentioned OR mention_count > last_mention_count) DESC,
                   ci_approval_needed DESC, updated_at DESC",
@@ -781,6 +798,7 @@ pub fn list_review_prs(conn: &Connection, user: &str) -> Vec<ReviewPrRow> {
             checks_queued: row.get(24)?,
             re_review_requested: row.get::<_, i64>(25)? != 0,
             drci_updated_at: row.get(26)?,
+            drci_ai_verdict: row.get(27)?,
         })
     })
     .unwrap()
@@ -843,7 +861,7 @@ pub fn get_review_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> 
                 updated_at, ci_approval_needed,
                 checks_success, checks_fail, checks_pending, base_sha,
                 (is_mentioned OR mention_count > last_mention_count),
-                checks_queued, re_review_requested, drci_updated_at
+                checks_queued, re_review_requested, drci_updated_at, drci_ai_verdict
          FROM review_prs WHERE target_user = ?1 AND repo = ?2 AND number = ?3",
         rusqlite::params![user, repo, number],
         |row| {
@@ -875,6 +893,7 @@ pub fn get_review_pr(conn: &Connection, repo: &str, number: i64, user: &str) -> 
                 checks_queued: row.get(24)?,
                 re_review_requested: row.get::<_, i64>(25)? != 0,
                 drci_updated_at: row.get(26)?,
+                drci_ai_verdict: row.get(27)?,
             })
         },
     )
@@ -947,6 +966,8 @@ pub struct PrDetailUpdate {
     pub drci_emoji: String,
     pub drci_status: String,
     pub drci_updated_at: String,
+    /// See `PrRow::drci_ai_verdict`.
+    pub drci_ai_verdict: String,
     pub landing_status: String,
     pub mention_count: i64,
 }
@@ -960,6 +981,7 @@ pub fn update_pr_details(conn: &Connection, repo: &str, number: i64, user: &str,
             checks_success = ?1, checks_fail = ?2, checks_pending = ?3, checks_running = ?4,
             drci_emoji = ?5, drci_status = ?6, landing_status = ?7,
             checks_queued = ?8,
+            drci_ai_verdict = ?12,
             detail_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
             detail_for_updated_at = updated_at
          WHERE target_user = ?9 AND repo = ?10 AND number = ?11",
@@ -968,6 +990,7 @@ pub fn update_pr_details(conn: &Connection, repo: &str, number: i64, user: &str,
             d.drci_emoji, d.drci_status, d.landing_status,
             d.checks_queued,
             user, repo, number,
+            d.drci_ai_verdict,
         ],
     ).ok();
 }
@@ -985,6 +1008,7 @@ pub fn update_review_pr_details(conn: &Connection, repo: &str, number: i64, user
             mention_count = ?7,
             checks_queued = ?8,
             drci_updated_at = ?12,
+            drci_ai_verdict = ?13,
             detail_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
             detail_for_updated_at = updated_at
          WHERE target_user = ?9 AND repo = ?10 AND number = ?11",
@@ -994,6 +1018,7 @@ pub fn update_review_pr_details(conn: &Connection, repo: &str, number: i64, user
             d.checks_queued,
             user, repo, number,
             d.drci_updated_at,
+            d.drci_ai_verdict,
         ],
     ).ok();
 }
@@ -1120,6 +1145,7 @@ mod tests {
             drci_emoji: String::new(),
             drci_status: String::new(),
             drci_updated_at: String::new(),
+            drci_ai_verdict: String::new(),
             landing_status: String::new(),
             mention_count,
         }
@@ -1152,6 +1178,7 @@ mod tests {
             checks_running: false,
             drci_status: String::new(),
             drci_emoji: String::new(),
+            drci_ai_verdict: String::new(),
             comment_count: 0,
             head_sha: String::new(),
             ci_approval_needed,
@@ -1280,6 +1307,8 @@ mod tests {
         assert_eq!(version as usize, MIGRATIONS.len(),
             "every migration in MIGRATIONS must run");
         assert!(has_column(&conn, "review_prs", "drci_updated_at"));
+        assert!(has_column(&conn, "prs", "drci_ai_verdict"));
+        assert!(has_column(&conn, "review_prs", "drci_ai_verdict"));
     }
 
     #[test]
@@ -1358,10 +1387,44 @@ mod tests {
         let d = PrDetailUpdate {
             checks_success: 5, checks_fail: 2, checks_pending: 0, checks_queued: 0,
             checks_running: false, drci_emoji: String::new(), drci_status: String::new(),
-            drci_updated_at: String::new(), landing_status: String::new(), mention_count: 0,
+            drci_updated_at: String::new(), drci_ai_verdict: String::new(),
+            landing_status: String::new(), mention_count: 0,
         };
         update_review_pr_details(&conn, "pytorch/pytorch", 1, "me", &d);
         assert_eq!(get_review_pr(&conn, "pytorch/pytorch", 1, "me").unwrap().checks_overall, "PENDING");
+    }
+
+    #[test]
+    fn drci_ai_verdict_round_trips_through_detail_update() {
+        let conn = test_db();
+        insert_review_pr(&conn, 1, "2020-01-01T00:00:00Z", "FAILURE");
+        let mut d = detail(0);
+        d.drci_emoji = "x".to_string();
+        d.drci_ai_verdict = r#"{"not_related":2,"pending":0,"related":0,"uncertain":0}"#.to_string();
+        update_review_pr_details(&conn, "pytorch/pytorch", 1, "me", &d);
+        assert_eq!(
+            get_review_pr(&conn, "pytorch/pytorch", 1, "me").unwrap().drci_ai_verdict,
+            r#"{"not_related":2,"pending":0,"related":0,"uncertain":0}"#
+        );
+    }
+
+    #[test]
+    fn light_upsert_preserves_detail_fetched_ai_verdict() {
+        // The detail fetch records the AI verdict; a later light upsert carries
+        // no comments (empty verdict) and must not wipe it — same CASE WHEN guard
+        // that protects drci_status/drci_emoji.
+        let conn = test_db();
+        insert_review_pr(&conn, 1, "2020-01-01T00:00:00Z", "FAILURE");
+        let mut d = detail(0);
+        d.drci_ai_verdict = r#"{"not_related":1}"#.to_string();
+        update_review_pr_details(&conn, "pytorch/pytorch", 1, "me", &d);
+
+        upsert_review_prs(&conn, &[review_insert(1, false, "t2")], "me").unwrap();
+        assert_eq!(
+            get_review_pr(&conn, "pytorch/pytorch", 1, "me").unwrap().drci_ai_verdict,
+            r#"{"not_related":1}"#,
+            "a light upsert with no verdict must not clobber the detail-fetched one"
+        );
     }
 
     #[test]

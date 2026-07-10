@@ -682,6 +682,7 @@ fn convert_prs(nodes: &[GqlPr], user: &str) -> Vec<PrInsert> {
             base_sha: extract_base_sha(pr),
             ci_approval_needed: false,
             re_review_requested: extract_re_review_requested(pr, user),
+            drci_ai_verdict: extract_ai_verdict(pr),
         }
     }).collect()
 }
@@ -1220,6 +1221,7 @@ pub async fn fetch_pr_details(repo: &str, number: i64, include_landing: bool, me
         drci_emoji,
         drci_status,
         drci_updated_at,
+        drci_ai_verdict: extract_ai_verdict_from_detail_comments(&pr.comments.nodes),
         landing_status,
         mention_count,
     })
@@ -1292,6 +1294,107 @@ fn extract_drci_from_detail_comments(comments: &[DetailComment]) -> (String, Str
         return (String::new(), String::new(), updated_at);
     }
     (String::new(), String::new(), String::new())
+}
+
+/// Buckets of per-failure AI advisor verdicts found in a DrCI comment. DrCI's
+/// summary emoji ignores these, so a PR can show a red `:x:` while the AI has
+/// judged every failure it looked at as "not related" (safe to merge).
+/// test-infra emits a machine-readable `alt="AI verdict: <label>"` for each
+/// new/unclassified failure (see advisorBadge.ts) — exactly the failures that
+/// drive the red `:x:`. We tally those labels.
+#[derive(Default, PartialEq, Debug, Clone, Copy)]
+struct AiVerdicts {
+    /// AI thinks the failure is related to this PR (blocking): "related",
+    /// "probably related".
+    related: i64,
+    /// AI thinks the failure isn't the PR's fault (safe): "not related",
+    /// "probably not related", plus suppressed signals ("garbage"/"infra issue").
+    not_related: i64,
+    /// AI couldn't decide confidently: "inconclusive" or any "(uncertain)".
+    uncertain: i64,
+    /// Advisor still analyzing (the "pending" sentinel, badge shows "analyzing").
+    pending: i64,
+}
+
+/// Tally the `alt="AI verdict: <label>"` badges in a DrCI comment body.
+fn parse_ai_verdicts(body: &str) -> AiVerdicts {
+    let needle = "alt=\"AI verdict: ";
+    let mut v = AiVerdicts::default();
+    let mut rest = body;
+    while let Some(pos) = rest.find(needle) {
+        let after = &rest[pos + needle.len()..];
+        let end = match after.find('"') {
+            Some(e) => e,
+            None => break,
+        };
+        let label = after[..end].to_ascii_lowercase();
+        rest = &after[end..];
+        // Order matters: the less-confident / more-specific labels are checked
+        // first so "not related" isn't swallowed by the bare "related" arm and
+        // any "(uncertain)" verdict is bucketed conservatively, not as a pole.
+        if label.contains("pending") || label.contains("analyzing") {
+            v.pending += 1;
+        } else if label.contains("uncertain") || label.contains("inconclusive") {
+            v.uncertain += 1;
+        } else if label.contains("not related") {
+            v.not_related += 1;
+        } else if label.contains("related") {
+            v.related += 1;
+        } else if label.contains("garbage") || label.contains("infra") {
+            v.not_related += 1;
+        } else {
+            // Unknown/blank label: don't guess a pole.
+            v.uncertain += 1;
+        }
+    }
+    v
+}
+
+/// Serialize AI verdict tallies to the compact JSON blob we store. Returns ""
+/// when there are none, so the light query (which never sees comments) and the
+/// "advisor not enabled" case store the same empty sentinel.
+fn ai_verdict_json(body: &str) -> String {
+    let v = parse_ai_verdicts(body);
+    if v == AiVerdicts::default() {
+        return String::new();
+    }
+    serde_json::json!({
+        "related": v.related,
+        "not_related": v.not_related,
+        "uncertain": v.uncertain,
+        "pending": v.pending,
+    })
+    .to_string()
+}
+
+/// Find the DrCI comment among a PR's list-level comments and tally its AI
+/// verdict badges. Empty when there's no DrCI comment or it has no verdicts.
+fn extract_ai_verdict(pr: &GqlPr) -> String {
+    let comments = match &pr.comments {
+        Some(c) => &c.nodes,
+        None => return String::new(),
+    };
+    for comment in comments {
+        if comment.body.contains("drci-comment-start") {
+            return ai_verdict_json(&comment.body);
+        }
+    }
+    String::new()
+}
+
+/// Same as `extract_ai_verdict` but for the richer detail-fetch comments, which
+/// carry author info so we can require the pytorch-bot DrCI comment specifically.
+fn extract_ai_verdict_from_detail_comments(comments: &[DetailComment]) -> String {
+    for comment in comments {
+        let login = comment.author.as_ref().map(|a| a.login.as_str()).unwrap_or("");
+        if login != "pytorch-bot" && login != "pytorch-bot[bot]" {
+            continue;
+        }
+        if comment.body.contains("drci-comment-start") {
+            return ai_verdict_json(&comment.body);
+        }
+    }
+    String::new()
 }
 
 fn extract_landing_status(comments: &[DetailComment], committed_date: Option<&str>) -> String {
@@ -1486,6 +1589,7 @@ pub async fn fetch_pr_details_batch(
             drci_emoji,
             drci_status,
             drci_updated_at,
+            drci_ai_verdict: extract_ai_verdict_from_detail_comments(&pr.comments.nodes),
             landing_status,
             mention_count,
         }));
@@ -1566,6 +1670,85 @@ mod tests {
         let cs = vec![comment("just a regular comment")];
         let (_emoji, _status, updated_at) = extract_drci_from_detail_comments(&cs);
         assert_eq!(updated_at, "");
+    }
+
+    // A DrCI comment body with `n` AI verdict badges, one per supplied label.
+    // Mirrors the `alt="AI verdict: <label>"` markup emitted by test-infra's
+    // advisorBadge.ts renderVerdictLine/renderInProgressLine.
+    fn body_with_verdicts(labels: &[&str]) -> String {
+        let mut s = String::from("## :x: 1 Unclassified Failure\n");
+        for label in labels {
+            s.push_str(&format!(
+                "  <details><summary>AI verdict: <a href=\"h\"><img alt=\"AI verdict: {}\" src=\"s\"></a></summary></details>\n",
+                label
+            ));
+        }
+        s
+    }
+
+    #[test]
+    fn ai_verdict_buckets_each_label() {
+        let v = parse_ai_verdicts(&body_with_verdicts(&[
+            "related",
+            "probably related",
+            "not related",
+            "probably not related",
+            "not related (uncertain)",
+            "related (uncertain)",
+            "inconclusive",
+            "garbage",
+            "infra issue",
+            "pending",
+        ]));
+        assert_eq!(
+            v,
+            AiVerdicts {
+                // related + probably related
+                related: 2,
+                // not related + probably not related + garbage + infra issue
+                not_related: 4,
+                // not related (uncertain) + related (uncertain) + inconclusive
+                uncertain: 3,
+                pending: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn ai_verdict_matches_real_drci_markup() {
+        // The exact "not related" line shape from pytorch/pytorch#189486.
+        let body = concat!(
+            "## :x: 5 Pending, 1 Unrelated Failure, 1 Unclassified Failure\n",
+            "  <details><summary>AI verdict: ",
+            "<a href=\"https://hud.pytorch.org/pr/pytorch/pytorch/189486#86229846571\">",
+            "<img alt=\"AI verdict: not related\" ",
+            "src=\"https://hud.pytorch.org/api/drci/advisorBadge?owner=pytorch\"></a>",
+            "</summary><blockquote>\n</blockquote></details>\n",
+        );
+        assert_eq!(ai_verdict_json(body),
+            r#"{"not_related":1,"pending":0,"related":0,"uncertain":0}"#);
+    }
+
+    #[test]
+    fn ai_verdict_json_empty_when_no_badges() {
+        assert_eq!(ai_verdict_json("## :x: 1 New Failure\nno advisor here"), "");
+    }
+
+    #[test]
+    fn extract_ai_verdict_finds_pytorch_bot_drci_comment() {
+        let cs = vec![
+            comment("a human commented: AI verdict: related (should be ignored)"),
+            drci_comment(&body_with_verdicts(&["not related", "not related"]), None),
+        ];
+        assert_eq!(extract_ai_verdict_from_detail_comments(&cs),
+            r#"{"not_related":2,"pending":0,"related":0,"uncertain":0}"#);
+    }
+
+    #[test]
+    fn extract_ai_verdict_ignores_non_drci_comments() {
+        // A non-pytorch-bot comment mentioning the phrase must not be counted.
+        let cs = vec![comment(&body_with_verdicts(&["related"]))];
+        assert_eq!(extract_ai_verdict_from_detail_comments(&cs), "");
     }
 
     #[test]

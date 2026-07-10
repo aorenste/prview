@@ -180,13 +180,65 @@ function reviewPill(pr) {
   return `<span class="pill pill-muted" data-tip="${escapeHtml(tip)}"><span class="pill-dot"></span>None</span>`;
 }
 
+// DrCI's per-failure AI advisor verdict tallies (a JSON blob from the server;
+// see github.rs::AiVerdicts), or null when DrCI posted none.
+function aiVerdict(pr) {
+  if (!pr.drci_ai_verdict) return null;
+  try {
+    const v = JSON.parse(pr.drci_ai_verdict);
+    return {
+      related: v.related || 0,
+      not_related: v.not_related || 0,
+      uncertain: v.uncertain || 0,
+      pending: v.pending || 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// True when the AI advisor judged every failure DrCI flagged as "not related":
+// at least one not-related verdict and nothing related, still analyzing, or too
+// uncertain to call. DrCI's summary emoji ignores AI verdicts, so this is how a
+// red :x: whose failures are all "not related" gets treated as passing.
+function aiSaysSafe(pr) {
+  const v = aiVerdict(pr);
+  return !!v && v.related === 0 && v.uncertain === 0 && v.pending === 0 && v.not_related > 0;
+}
+
+// Human-readable AI verdict summary for the DrCI tooltip, e.g. "AI: 1 related,
+// 2 not related". Empty when there are no verdicts.
+function aiVerdictTip(pr) {
+  const v = aiVerdict(pr);
+  if (!v) return '';
+  const parts = [];
+  if (v.related) parts.push(`${v.related} related`);
+  if (v.not_related) parts.push(`${v.not_related} not related`);
+  if (v.uncertain) parts.push(`${v.uncertain} uncertain`);
+  if (v.pending) parts.push(`${v.pending} analyzing`);
+  return parts.length ? `AI: ${parts.join(', ')}` : '';
+}
+
 function drciPill(pr) {
+  const aiTip = aiVerdictTip(pr);
+  // Combine the DrCI status text with the AI summary, then escape once.
+  const tipFor = (base) => escapeHtml(
+    aiTip ? (base ? `${base} · ${aiTip}` : aiTip) : (base || '')
+  );
+
   if (!pr.drci_emoji) {
     if (pr.checks_pending > 0)
-      return '<span class="pill pill-yellow" data-tip="DrCI pending"><span class="spinner"></span>Pending</span>';
-    return '<span class="pill pill-muted" data-tip="No DrCI status"><span class="pill-dot"></span>None</span>';
+      return `<span class="pill pill-yellow" data-tip="${tipFor('DrCI pending')}"><span class="spinner"></span>Pending</span>`;
+    return `<span class="pill pill-muted" data-tip="${tipFor('No DrCI status')}"><span class="pill-dot"></span>None</span>`;
   }
-  const tip = escapeHtml(pr.drci_status);
+
+  // DrCI flags a red :x:, but the AI advisor judged every failure it looked at
+  // as "not related". Surface that as a softer, passing-leaning pill (matching
+  // isCiPassing, which lets such a PR through the "Only show passing" filter).
+  if (pr.drci_emoji === 'x' && aiSaysSafe(pr)) {
+    return `<span class="pill pill-green" data-tip="${tipFor(pr.drci_status)}"><span class="pill-dot"></span>Not related</span>`;
+  }
+
   const m = {
     'white_check_mark': ['pill-green', 'Passing'],
     'x': ['pill-red', pr.checks_pending > 0 ? 'Failing' : 'Failed'],
@@ -197,7 +249,7 @@ function drciPill(pr) {
   const dot = spinning
     ? `<span class="spinner${cls === 'pill-red' ? ' spinner-red' : ''}"></span>`
     : '<span class="pill-dot"></span>';
-  return `<span class="pill ${cls}" data-tip="${tip}">${dot}${label}</span>`;
+  return `<span class="pill ${cls}" data-tip="${tipFor(pr.drci_status)}">${dot}${label}</span>`;
 }
 
 
@@ -444,15 +496,17 @@ function isCiPassing(pr) {
   //   2. CI fully green               -> passing
   //   3+ CI has red -> defer to DrCI, which knows about flaky/unrelated failures:
   //   3. DrCI says passing            -> passing
-  //   4. DrCI says failing            -> not passing
-  //   5. DrCI gave no verdict and has gone stale -> indeterminate, treat as
+  //   4. DrCI says failing, but the AI advisor judged every flagged failure as
+  //      "not related"               -> passing (see aiSaysSafe)
+  //   5. DrCI says failing            -> not passing
+  //   6. DrCI gave no verdict and has gone stale -> indeterminate, treat as
   //      passing so the PR still surfaces here (otherwise we'd never see it)
-  //   6. DrCI gave no verdict but updated recently -> still catching up = building
+  //   7. DrCI gave no verdict but updated recently -> still catching up = building
   if (pr.checks_overall === 'PENDING' || pr.checks_running) return false;  // 1
   if (pr.checks_overall === 'SUCCESS') return true;                         // 2
   if (pr.drci_emoji === 'white_check_mark') return true;                    // 3
-  if (pr.drci_emoji === 'x') return false;                                  // 4
-  return drciIsStale(pr);                                                   // 5 / 6
+  if (pr.drci_emoji === 'x') return aiSaysSafe(pr);                         // 4 / 5
+  return drciIsStale(pr);                                                   // 6 / 7
 }
 
 function renderReviews() {

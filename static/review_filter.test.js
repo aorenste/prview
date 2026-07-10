@@ -25,6 +25,7 @@ function reviewPr(overrides) {
     drci_emoji: '',
     drci_status: '',
     drci_updated_at: '',
+    drci_ai_verdict: '',
     checks_overall: '',
     checks_running: false,
     comment_count: 0,
@@ -134,9 +135,10 @@ test('approved PR you were mentioned in stays visible', () => {
 //  2. CI fully green               -> passing (shown)
 //  3+ CI has red -> defer to DrCI:
 //  3. DrCI says passing            -> shown
-//  4. DrCI says failing            -> hidden
-//  5. DrCI no verdict, >20m stale  -> indeterminate, shown (so it isn't lost)
-//  6. DrCI no verdict, recent      -> still catching up = building, hidden
+//  4. DrCI says failing, but AI advisor says every failure is "not related" -> shown
+//  5. DrCI says failing            -> hidden
+//  6. DrCI no verdict, >20m stale  -> indeterminate, shown (so it isn't lost)
+//  7. DrCI no verdict, recent      -> still catching up = building, hidden
 
 function passingOnly() {
   return loadApp({ prefs: { showPassing: true } });
@@ -189,7 +191,53 @@ test('Only show passing: red CI + DrCI says pass is shown (rule 3)', () => {
     'red CI that DrCI clears as passing should be shown');
 });
 
-test('Only show passing: red CI + DrCI says fail is hidden (rule 4)', () => {
+function aiBlob({ related = 0, not_related = 0, uncertain = 0, pending = 0 } = {}) {
+  return JSON.stringify({ related, not_related, uncertain, pending });
+}
+
+test('Only show passing: red DrCI whose failures the AI calls "not related" is shown (rule 4)', () => {
+  // Repro for pytorch/pytorch#189486: DrCI shows :x: for an unclassified failure
+  // but the AI advisor judged it "not related", so it's effectively mergeable.
+  const win = passingOnly();
+  feedReviews(win, [reviewPr({
+    number: 189486,
+    checks_overall: 'FAILURE',
+    drci_emoji: 'x',
+    drci_ai_verdict: aiBlob({ not_related: 2 }),
+    drci_updated_at: minutesAgo(2),
+  })]);
+  assert.ok(rowKeys(win).includes('pytorch/pytorch#189486'),
+    'a red DrCI whose failures are all AI "not related" should be shown as passing');
+});
+
+test('Only show passing: AI "related" verdict keeps a red DrCI hidden (rule 5)', () => {
+  const win = passingOnly();
+  feedReviews(win, [reviewPr({
+    number: 51,
+    checks_overall: 'FAILURE',
+    drci_emoji: 'x',
+    drci_ai_verdict: aiBlob({ related: 1, not_related: 1 }),
+    drci_updated_at: minutesAgo(2),
+  })]);
+  assert.ok(!rowKeys(win).includes('pytorch/pytorch#51'),
+    'any AI "related" verdict means the failure could be real -> hidden');
+});
+
+test('Only show passing: an uncertain/analyzing AI verdict keeps a red DrCI hidden (rule 5)', () => {
+  const win = passingOnly();
+  feedReviews(win, [
+    reviewPr({ number: 52, checks_overall: 'FAILURE', drci_emoji: 'x',
+      drci_ai_verdict: aiBlob({ not_related: 1, uncertain: 1 }), drci_updated_at: minutesAgo(2) }),
+    reviewPr({ number: 53, checks_overall: 'FAILURE', drci_emoji: 'x',
+      drci_ai_verdict: aiBlob({ not_related: 1, pending: 1 }), drci_updated_at: minutesAgo(2) }),
+  ]);
+  assert.ok(!rowKeys(win).includes('pytorch/pytorch#52'),
+    'an uncertain verdict is not confident enough to call the PR passing');
+  assert.ok(!rowKeys(win).includes('pytorch/pytorch#53'),
+    'a still-analyzing verdict is not a conclusion yet');
+});
+
+test('Only show passing: red CI + DrCI says fail with no AI verdict is hidden (rule 5)', () => {
   const win = passingOnly();
   feedReviews(win, [reviewPr({
     number: 5,
@@ -198,7 +246,22 @@ test('Only show passing: red CI + DrCI says fail is hidden (rule 4)', () => {
     drci_updated_at: minutesAgo(2),
   })]);
   assert.ok(!rowKeys(win).includes('pytorch/pytorch#5'),
-    'red CI that DrCI confirms as failing should be hidden');
+    'red CI that DrCI confirms as failing (no AI verdict) should be hidden');
+});
+
+test('DrCI cell shows a "Not related" pill and AI tooltip when the AI clears a red DrCI', () => {
+  const win = loadApp();
+  feedReviews(win, [reviewPr({
+    number: 60,
+    checks_overall: 'FAILURE',
+    drci_emoji: 'x',
+    drci_status: '1 Unclassified Failure',
+    drci_ai_verdict: aiBlob({ not_related: 1 }),
+  })]);
+  const row = win.document.querySelector('#reviews-body tr[data-key="pytorch/pytorch#60"]');
+  assert.ok(row, 'the PR row should be visible');
+  assert.match(row.innerHTML, /Not related/, 'renders the softer AI pill label');
+  assert.match(row.innerHTML, /AI: 1 not related/, 'the tooltip includes the AI summary');
 });
 
 test('Only show passing: red CI + no DrCI verdict, stale DrCI is shown (rule 5)', () => {
