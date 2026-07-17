@@ -574,6 +574,10 @@ pub struct FetchResult {
     pub review_prs: Vec<PrInsert>,
     pub merged_prs: Vec<MergedPrRow>,
     pub issues: Vec<IssueInsert>,
+    /// Whether the open-issue query actually succeeded this cycle. False means
+    /// the fetch errored (issues is empty as a fallback), so the worker must NOT
+    /// reconcile deletions — absence isn't affirmative when the fetch failed.
+    pub issues_ok: bool,
     /// (repo, number) of ALL authored PRs that closed in the last 7 days —
     /// including manually closed (not just merged/landed). Used to remove them
     /// from the prs table. merged_prs is a subset used for the display list.
@@ -758,6 +762,14 @@ pub async fn check_pr_state(repo: &str, number: i64) -> Result<String, BoxErr> {
     Ok(v.get("state").and_then(|s| s.as_str()).unwrap_or("unknown").to_string())
 }
 
+/// Check a single issue's state via REST. Returns "open", "closed", or "unknown".
+pub async fn check_issue_state(repo: &str, number: i64) -> Result<String, BoxErr> {
+    let endpoint = format!("repos/{}/issues/{}", repo, number);
+    let body = rest_get(&endpoint).await?;
+    let v: serde_json::Value = serde_json::from_slice(&body)?;
+    Ok(v.get("state").and_then(|s| s.as_str()).unwrap_or("unknown").to_string())
+}
+
 pub async fn check_ci_approval_needed(repo: &str, head_sha: &str) -> bool {
     if head_sha.is_empty() {
         return false;
@@ -830,10 +842,10 @@ pub async fn fetch_all_prs(_user: &str) -> Result<FetchResult, Box<dyn std::erro
         },
         async {
             match run_issue_query(&issue_query, ISSUE_FIELDS).await {
-                Ok(nodes) => convert_issues(&nodes),
+                Ok(nodes) => Some(convert_issues(&nodes)),
                 Err(e) => {
                     log!("Warning: failed to fetch issues: {}", e);
-                    vec![]
+                    None
                 }
             }
         },
@@ -851,11 +863,14 @@ pub async fn fetch_all_prs(_user: &str) -> Result<FetchResult, Box<dyn std::erro
     );
 
     let (merged_prs, closed_authored) = landed_result;
+    let issues_ok = issues.is_some();
+    let issues = issues.unwrap_or_default();
     Ok(FetchResult {
         my_prs: convert_prs(&my_nodes, _user),
         review_prs,
         merged_prs,
         issues,
+        issues_ok,
         closed_authored,
         closed_reviewed,
     })

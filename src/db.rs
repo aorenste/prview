@@ -1079,6 +1079,13 @@ pub fn upsert_issues(conn: &Connection, issues: &[IssueInsert], user: &str) -> R
     Ok(())
 }
 
+pub fn delete_issue(conn: &Connection, repo: &str, number: i64, user: &str) {
+    conn.execute(
+        "DELETE FROM issues WHERE target_user = ?1 AND repo = ?2 AND number = ?3",
+        rusqlite::params![user, repo, number],
+    ).ok();
+}
+
 pub fn list_issues(conn: &Connection, user: &str) -> Vec<IssueRow> {
     let mut stmt = conn.prepare(
         "SELECT repo, number, title, url, author, created_at, updated_at, comment_count, labels
@@ -1293,6 +1300,30 @@ mod tests {
 
         assert!(!is_mentioned(&conn, 167224),
             "the 22->23 migration should clear a stuck auto-set mention bit");
+    }
+
+    #[test]
+    fn delete_issue_removes_a_closed_issue() {
+        // Repro for #137874: a closed issue lingers because upsert never deletes
+        // on absence; delete_issue is the affirmative removal.
+        let conn = test_db();
+        let issue = IssueInsert {
+            number: 137874,
+            repo: "pytorch/pytorch".to_string(),
+            title: "t".to_string(),
+            url: "u".to_string(),
+            author: "a".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            comment_count: 0,
+            labels: "[]".to_string(),
+        };
+        upsert_issues(&conn, &[issue], "me").unwrap();
+        assert_eq!(list_issues(&conn, "me").len(), 1, "precondition: issue present");
+
+        delete_issue(&conn, "pytorch/pytorch", 137874, "me");
+        assert!(list_issues(&conn, "me").is_empty(),
+            "a deleted issue should be gone from the list");
     }
 
     #[test]

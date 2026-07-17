@@ -392,7 +392,7 @@ async fn fetch_and_store(
             .cloned()
             .collect();
         let old_review_keys: HashSet<(String, i64)> = old_reviews.keys().cloned().collect();
-        let to_verify = review_prs_needing_verification(&old_review_keys, &fetched_keys, &closed_keys);
+        let to_verify = keys_needing_verification(&old_review_keys, &fetched_keys, &closed_keys);
         for (repo, number) in &to_verify {
             match github::check_pr_state(repo, *number).await {
                 Ok(state) if state != "open" => {
@@ -403,6 +403,58 @@ async fn fetch_and_store(
                 Ok(_) => {} // still open — search hiccup, leave it
                 Err(e) => {
                     log!("[{}] Failed to check state of {}/#{}: {}", label, repo, number, e);
+                }
+            }
+        }
+    }
+
+    // Authored PRs get the same fallback. `closed_authored` is built from a
+    // `closed:>DATE` search whose index lags GitHub's closed-state facet, so a
+    // just-landed PR (e.g. a ghstack PR stuck showing "landing") can be missing
+    // from BOTH the open fetch and the closed set. REST-verify and delete those;
+    // otherwise an authored PR would linger forever with a stale landing status.
+    {
+        let fetched_keys: HashSet<(String, i64)> = result.my_prs.iter()
+            .map(|pr| (pr.repo.clone(), pr.number))
+            .collect();
+        let closed_keys: HashSet<(String, i64)> = result.closed_authored.iter().cloned().collect();
+        let old_pr_keys: HashSet<(String, i64)> = old_prs.keys().cloned().collect();
+        let to_verify = keys_needing_verification(&old_pr_keys, &fetched_keys, &closed_keys);
+        for (repo, number) in &to_verify {
+            match github::check_pr_state(repo, *number).await {
+                Ok(state) if state != "open" => {
+                    log!("[{}] Authored PR {}/#{} is {}, removing", label, repo, number, state);
+                    let conn = db.lock().unwrap();
+                    db::delete_pr(&conn, repo, *number, user);
+                }
+                Ok(_) => {} // still open — search hiccup, leave it
+                Err(e) => {
+                    log!("[{}] Failed to check state of PR {}/#{}: {}", label, repo, number, e);
+                }
+            }
+        }
+    }
+
+    // Issues have no closed-issue query (unlike PRs). The open-issue fetch
+    // returns the complete current set, so any tracked issue missing from a
+    // *successful* fetch was closed or unassigned. REST-verify each before
+    // deleting so a transient search hiccup can't drop a still-open issue.
+    if result.issues_ok {
+        let fetched_keys: HashSet<(String, i64)> = result.issues.iter()
+            .map(|i| (i.repo.clone(), i.number))
+            .collect();
+        let old_issue_keys: HashSet<(String, i64)> = old_issues.keys().cloned().collect();
+        let to_verify = issues_needing_verification(&old_issue_keys, &fetched_keys);
+        for (repo, number) in &to_verify {
+            match github::check_issue_state(repo, *number).await {
+                Ok(state) if state != "open" => {
+                    log!("[{}] Issue {}/#{} is {}, removing", label, repo, number, state);
+                    let conn = db.lock().unwrap();
+                    db::delete_issue(&conn, repo, *number, user);
+                }
+                Ok(_) => {} // still open — search hiccup, leave it
+                Err(e) => {
+                    log!("[{}] Failed to check state of issue {}/#{}: {}", label, repo, number, e);
                 }
             }
         }
@@ -518,17 +570,33 @@ async fn fetch_and_store(
 
 use std::collections::HashSet;
 
-/// Identify review_prs that were in the DB but missing from both the open-PR
-/// search results AND the closed-query results. These need an individual REST
-/// state check to decide whether to keep (search hiccup) or delete (truly
-/// closed). Returns (repo, number) pairs.
-fn review_prs_needing_verification(
-    old_review_keys: &HashSet<(String, i64)>,
+/// Identify tracked PRs (authored or review-requested) that were in the DB but
+/// missing from BOTH the open-PR search results AND the closed-query results.
+/// GitHub's `closed:>DATE` search index lags the closed-state facet, so a
+/// just-closed PR can be absent from both even though it's really closed; these
+/// need an individual REST state check to decide whether to keep (search hiccup)
+/// or delete (truly closed). Returns (repo, number) pairs.
+fn keys_needing_verification(
+    old_keys: &HashSet<(String, i64)>,
     fetched_keys: &HashSet<(String, i64)>,
     closed_keys: &HashSet<(String, i64)>,
 ) -> Vec<(String, i64)> {
-    old_review_keys.iter()
+    old_keys.iter()
         .filter(|k| !fetched_keys.contains(k) && !closed_keys.contains(k))
+        .cloned()
+        .collect()
+}
+
+/// Identify issues that were in the DB but missing from a *successful* open-issue
+/// fetch. Unlike PRs there's no closed-issue query, so absence from the complete
+/// open set is the signal; each candidate is REST-verified before deletion so a
+/// transient search hiccup can't drop a still-open issue. Returns (repo, number).
+fn issues_needing_verification(
+    old_issue_keys: &HashSet<(String, i64)>,
+    fetched_keys: &HashSet<(String, i64)>,
+) -> Vec<(String, i64)> {
+    old_issue_keys.iter()
+        .filter(|k| !fetched_keys.contains(k))
         .cloned()
         .collect()
 }
@@ -546,7 +614,7 @@ mod tests {
         let old = HashSet::from([key("pytorch/pytorch", 182427)]);
         let fetched = HashSet::new();
         let closed = HashSet::new();
-        let missing = review_prs_needing_verification(&old, &fetched, &closed);
+        let missing = keys_needing_verification(&old, &fetched, &closed);
         assert_eq!(missing.len(), 1);
         assert_eq!(missing[0].1, 182427);
     }
@@ -556,8 +624,20 @@ mod tests {
         let old = HashSet::from([key("pytorch/pytorch", 100)]);
         let fetched = HashSet::new();
         let closed = HashSet::from([key("pytorch/pytorch", 100)]);
-        let missing = review_prs_needing_verification(&old, &fetched, &closed);
+        let missing = keys_needing_verification(&old, &fetched, &closed);
         assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn authored_pr_missing_from_open_and_closed_needs_verification() {
+        // Repro for #190160: a just-landed ghstack PR is absent from the open
+        // fetch AND from the lagging `closed:>DATE` search, so closed_authored
+        // misses it. Without a REST-verify fallback it lingers showing "landing".
+        let old = HashSet::from([key("pytorch/pytorch", 190160)]);
+        let fetched = HashSet::new(); // not in open authored set (it's closed)
+        let closed = HashSet::new();  // closed:>DATE index hasn't caught it yet
+        let missing = keys_needing_verification(&old, &fetched, &closed);
+        assert_eq!(missing, vec![key("pytorch/pytorch", 190160)]);
     }
 
     #[test]
@@ -565,8 +645,25 @@ mod tests {
         let old = HashSet::from([key("pytorch/pytorch", 200)]);
         let fetched = HashSet::from([key("pytorch/pytorch", 200)]);
         let closed = HashSet::new();
-        let missing = review_prs_needing_verification(&old, &fetched, &closed);
+        let missing = keys_needing_verification(&old, &fetched, &closed);
         assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn issue_absent_from_open_fetch_needs_verification() {
+        // Repro for #137874: an issue we track is no longer in the open-issue
+        // fetch (it was closed), so it must be flagged for a state check.
+        let old = HashSet::from([key("pytorch/pytorch", 137874)]);
+        let fetched = HashSet::new();
+        let missing = issues_needing_verification(&old, &fetched);
+        assert_eq!(missing, vec![key("pytorch/pytorch", 137874)]);
+    }
+
+    #[test]
+    fn issue_present_in_open_fetch_not_verified() {
+        let old = HashSet::from([key("pytorch/pytorch", 42)]);
+        let fetched = HashSet::from([key("pytorch/pytorch", 42)]);
+        assert!(issues_needing_verification(&old, &fetched).is_empty());
     }
 
     #[test]
