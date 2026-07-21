@@ -267,6 +267,10 @@
   .pill-mention { background: var(--accent-bg); color: var(--accent); font-weight: 600; }
   .pill-mention .pill-dot { background: var(--accent); }
 
+  /* Effort column: added/removed line counts colored by review difficulty. */
+  .effort { font-variant-numeric: tabular-nums; white-space: nowrap; font-weight: 600; }
+  .effort-none { color: var(--text-muted); font-weight: 400; }
+
   /* Label pills */
   .label-pill {
     display: inline-flex;
@@ -468,6 +472,7 @@
   th[data-sort="review_status"], th[data-sort="checks_overall"], th[data-sort="drci_emoji"] { width: var(--col-status); }
   th[data-sort="author"] { width: var(--col-author); }
   th[data-sort="comment_count"] { width: var(--col-comments); }
+  th[data-sort="changed_lines"] { width: var(--col-comments); }
   th[data-sort="updated_at"] { width: var(--col-updated); }
   th.col-menu { width: var(--col-menu); }
   th.col-menu, td.menu-cell { padding-left: 6px; padding-right: 6px; }

@@ -241,6 +241,7 @@ const REVIEW_PR_FIELDS: &str = "
   number title url
   author { login }
   isDraft
+  additions deletions
   headRefName baseRefName
   baseRef { target { oid } }
   repository { nameWithOwner }
@@ -299,6 +300,10 @@ struct GqlPr {
     author: Option<GqlAuthor>,
     #[serde(default, rename = "isDraft")]
     is_draft: bool,
+    #[serde(default)]
+    additions: i64,
+    #[serde(default)]
+    deletions: i64,
     #[serde(default, rename = "headRefName")]
     head_ref_name: String,
     #[serde(default, rename = "baseRefName")]
@@ -687,6 +692,8 @@ fn convert_prs(nodes: &[GqlPr], user: &str) -> Vec<PrInsert> {
             ci_approval_needed: false,
             re_review_requested: extract_re_review_requested(pr, user),
             drci_ai_verdict: extract_ai_verdict(pr),
+            additions: pr.additions,
+            deletions: pr.deletions,
         }
     }).collect()
 }
@@ -1852,6 +1859,8 @@ mod tests {
             url: format!("https://github.com/pytorch/pytorch/pull/{}", number),
             author: Some(GqlAuthor { login: "aorenste".to_string() }),
             is_draft: false,
+            additions: 0,
+            deletions: 0,
             head_ref_name: String::new(),
             base_ref_name: String::new(),
             base_ref: None,

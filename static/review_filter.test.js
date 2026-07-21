@@ -29,6 +29,8 @@ function reviewPr(overrides) {
     checks_overall: '',
     checks_running: false,
     comment_count: 0,
+    additions: 0,
+    deletions: 0,
   }, overrides);
 }
 
@@ -262,6 +264,44 @@ test('DrCI cell shows a "Not related" pill and AI tooltip when the AI clears a r
   assert.ok(row, 'the PR row should be visible');
   assert.match(row.innerHTML, /Not related/, 'renders the softer AI pill label');
   assert.match(row.innerHTML, /AI: 1 not related/, 'the tooltip includes the AI summary');
+});
+
+test('Needs Attention: CI column is folded into the DrCI pill hover, no separate CI cell', () => {
+  const win = loadApp();
+  feedReviews(win, [reviewPr({
+    number: 61,
+    checks_overall: 'FAILURE',
+    drci_emoji: 'x',
+    drci_status: '1 New Failure',
+    checks_success: 10, checks_fail: 2, checks_pending: 3,
+  })]);
+  // Header renamed DrCI -> CI, and the standalone CI column is gone.
+  const headers = Array.from(win.document.querySelectorAll('#reviews-thead th'))
+    .map(th => th.textContent.replace(/[▲▴▼]/g, '').trim());
+  assert.ok(headers.includes('CI'), 'the DrCI column is relabeled "CI"');
+  assert.ok(headers.includes('Effort'), 'the Effort column is present');
+  assert.strictEqual(headers.filter(h => h === 'CI').length, 1, 'only one CI column');
+  // The raw CI check counts now live in the CI pill tooltip.
+  const row = win.document.querySelector('#reviews-body tr[data-key="pytorch/pytorch#61"]');
+  assert.match(row.innerHTML, /CI: 10 passed, 2 failed, 3 pending/,
+    'the CI check counts are folded into the pill tooltip');
+});
+
+test('Needs Attention: Effort cell shows +add -del colored by review difficulty', () => {
+  const win = loadApp();
+  feedReviews(win, [
+    reviewPr({ number: 185648, additions: 31, deletions: 26 }),   // 57 -> easy
+    reviewPr({ number: 71, additions: 400, deletions: 50 }),      // 450 -> medium
+    reviewPr({ number: 72, additions: 900, deletions: 100 }),     // 1000 -> hard
+    reviewPr({ number: 73, additions: 0, deletions: 0 }),         // none
+  ]);
+  const cell = (n) => win.document
+    .querySelector(`#reviews-body tr[data-key="pytorch/pytorch#${n}"] .effort`);
+  assert.strictEqual(cell(185648).textContent, '+31 -26', 'renders +added -deleted');
+  assert.match(cell(185648).getAttribute('style'), /var\(--green\)/, 'small diff is green (easy)');
+  assert.match(cell(71).getAttribute('style'), /var\(--yellow\)/, 'medium diff is yellow');
+  assert.match(cell(72).getAttribute('style'), /var\(--red\)/, 'large diff is red (hard)');
+  assert.strictEqual(cell(73).textContent, '—', 'no changes renders an em dash');
 });
 
 test('Only show passing: red CI + no DrCI verdict, stale DrCI is shown (rule 5)', () => {

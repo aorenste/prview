@@ -82,8 +82,8 @@ const reviewsCols = [
   { key: 'title', label: 'Title' },
   { key: 'author', label: 'Author' },
   { key: 'review_status', label: 'Review' },
-  { key: 'checks_overall', label: 'CI' },
-  { key: 'drci_emoji', label: 'DrCI' },
+  { key: 'drci_emoji', label: 'CI' },
+  { key: 'changed_lines', label: 'Effort' },
   { key: 'comment_count', label: 'Comments', narrowLabel: 'C' },
   { key: 'updated_at', label: 'Updated', narrowLabel: 'U' },
   { key: null, label: '', cls: 'col-menu' },
@@ -114,7 +114,15 @@ function renderHeaders(theadId, cols, sortState, onSort) {
 }
 
 function genericCompare(a, b, col) {
-  let va = a[col], vb = b[col];
+  let va, vb;
+  if (col === 'changed_lines') {
+    // The Effort column sorts by total lines changed (additions + deletions).
+    va = (a.additions || 0) + (a.deletions || 0);
+    vb = (b.additions || 0) + (b.deletions || 0);
+  } else {
+    va = a[col];
+    vb = b[col];
+  }
   if (va == null) va = '';
   if (vb == null) vb = '';
   if (typeof va === 'number' && typeof vb === 'number') return va - vb;
@@ -219,12 +227,26 @@ function aiVerdictTip(pr) {
   return parts.length ? `AI: ${parts.join(', ')}` : '';
 }
 
-function drciPill(pr) {
+// Raw CI check counts for a tooltip, e.g. "CI: 5 passed, 2 failed, 3 pending".
+// Empty when there's nothing to say.
+function ciChecksSummary(pr) {
+  const total = (pr.checks_success || 0) + (pr.checks_fail || 0) + (pr.checks_pending || 0);
+  if (total > 0) {
+    const q = pr.checks_queued > 0 ? ` (${pr.checks_queued} queued)` : '';
+    return `CI: ${pr.checks_success} passed, ${pr.checks_fail} failed, ${pr.checks_pending} pending${q}`;
+  }
+  if (pr.checks_overall) return `CI: ${pr.checks_overall}`;
+  return '';
+}
+
+// `includeChecks` folds the raw CI check counts into the tooltip — used on the
+// Needs Attention tab, where the standalone CI column is collapsed into this pill.
+function drciPill(pr, includeChecks = false) {
   const aiTip = aiVerdictTip(pr);
-  // Combine the DrCI status text with the AI summary, then escape once.
-  const tipFor = (base) => escapeHtml(
-    aiTip ? (base ? `${base} · ${aiTip}` : aiTip) : (base || '')
-  );
+  const ciTip = includeChecks ? ciChecksSummary(pr) : '';
+  // Combine the DrCI status text, the AI summary, and (optionally) the CI check
+  // counts into one tooltip; escape once.
+  const tipFor = (base) => escapeHtml([base, aiTip, ciTip].filter(Boolean).join(' · '));
 
   if (!pr.drci_emoji) {
     if (pr.checks_pending > 0)
@@ -252,6 +274,21 @@ function drciPill(pr) {
   return `<span class="pill ${cls}" data-tip="${tipFor(pr.drci_status)}">${dot}${label}</span>`;
 }
 
+// "Effort" cell: added/removed line counts (e.g. "+31 -26") colored by review
+// difficulty — green (easy) through yellow to red (hard), bucketed on total lines
+// changed. Thresholds are a rough heuristic and easy to tune.
+function effortCell(pr) {
+  const add = pr.additions || 0;
+  const del = pr.deletions || 0;
+  if (add === 0 && del === 0) return '<span class="effort effort-none">—</span>';
+  const total = add + del;
+  let color, label;
+  if (total <= 100) { color = 'var(--green)'; label = 'Easy'; }
+  else if (total <= 500) { color = 'var(--yellow)'; label = 'Medium'; }
+  else { color = 'var(--red)'; label = 'Hard'; }
+  const tip = `${label} — ${total} lines changed`;
+  return `<span class="effort" style="color:${color}" title="${escapeHtml(tip)}">+${add} -${del}</span>`;
+}
 
 function checksOverallPill(pr) {
   if (!pr.checks_overall) return '<span class="pill pill-muted"><span class="pill-dot"></span>None</span>';
@@ -662,8 +699,8 @@ function renderReviews() {
       <td class="title-cell"><a href="${escapeHtml(pr.url)}" target="_blank" onclick="markRead('${escapeHtml(pr.repo)}', ${pr.number})">${escapeHtml(pr.title)}</a></td>
       <td class="author-cell"><span class="author-text">${escapeHtml(pr.author)}</span></td>
       <td>${reviewCombinedPill(pr)}</td>
-      <td>${detailedCIPill(pr)}</td>
-      <td>${drciPill(pr)}</td>
+      <td>${drciPill(pr, true)}</td>
+      <td>${effortCell(pr)}</td>
       <td>${commentCell(pr)}</td>
       <td><span class="time-text" title="${escapeHtml(pr.updated_at || '')}">${relativeTime(pr.updated_at)}</span></td>
       <td class="menu-cell">
