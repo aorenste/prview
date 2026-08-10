@@ -777,6 +777,58 @@ pub async fn check_issue_state(repo: &str, number: i64) -> Result<String, BoxErr
     Ok(v.get("state").and_then(|s| s.as_str()).unwrap_or("unknown").to_string())
 }
 
+/// A review PR's authoritative (non-search) relationship to `user`: its state and
+/// whether the user is *currently* a requested reviewer or has left a review.
+pub struct ReviewRelevance {
+    /// "open" / "closed" / "merged" (lowercased).
+    pub state: String,
+    pub still_requested: bool,
+    pub has_review: bool,
+}
+
+/// Query a PR directly (not via search, so immune to search-index lag) for
+/// whether `user` still has a review relationship with it. Used to evict review
+/// PRs the user was un-requested from without ever reviewing — those silently
+/// drop out of both search queries but stay OPEN, so a state check alone keeps
+/// them forever.
+pub async fn check_review_relevance(repo: &str, number: i64, user: &str) -> Result<ReviewRelevance, BoxErr> {
+    let parts: Vec<&str> = repo.splitn(2, '/').collect();
+    if parts.len() != 2 {
+        return Err(format!("Invalid repo format: {}", repo).into());
+    }
+    let (owner, name) = (parts[0], parts[1]);
+    let query = format!(
+        r#"query {{
+  repository(owner: "{}", name: "{}") {{
+    pullRequest(number: {}) {{
+      state
+      reviewRequests(first: 50) {{ nodes {{ requestedReviewer {{ ... on User {{ login }} }} }} }}
+      reviews(first: 100) {{ nodes {{ author {{ login }} }} }}
+    }}
+  }}
+}}"#,
+        owner, name, number
+    );
+    let body = graphql(&query).await?;
+    let v: serde_json::Value = serde_json::from_slice(&body)?;
+    let pr = &v["data"]["repository"]["pullRequest"];
+    if pr.is_null() {
+        return Err(format!("PR {}#{} not found", repo, number).into());
+    }
+    let state = pr["state"].as_str().unwrap_or("unknown").to_lowercase();
+    let still_requested = pr["reviewRequests"]["nodes"].as_array().is_some_and(|ns| {
+        ns.iter().any(|n| {
+            n["requestedReviewer"]["login"].as_str().is_some_and(|l| l.eq_ignore_ascii_case(user))
+        })
+    });
+    let has_review = pr["reviews"]["nodes"].as_array().is_some_and(|ns| {
+        ns.iter().any(|n| {
+            n["author"]["login"].as_str().is_some_and(|l| l.eq_ignore_ascii_case(user))
+        })
+    });
+    Ok(ReviewRelevance { state, still_requested, has_review })
+}
+
 pub async fn check_ci_approval_needed(repo: &str, head_sha: &str) -> bool {
     if head_sha.is_empty() {
         return false;

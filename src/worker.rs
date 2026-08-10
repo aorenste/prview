@@ -380,9 +380,10 @@ async fn fetch_and_store(
         }
     }
 
-    // For review_prs that disappeared from the open-PR search but weren't
-    // caught by any closed query (e.g. review-requested PRs where GitHub
-    // clears the request on close), verify state individually via REST.
+    // For review_prs that disappeared from the open-PR search but weren't caught
+    // by any closed query, verify individually — directly (not via search) so
+    // it's immune to search-index lag. Remove if the PR closed OR you're no
+    // longer a requested reviewer and never reviewed it (added-then-removed).
     {
         let fetched_keys: HashSet<(String, i64)> = result.review_prs.iter()
             .map(|pr| (pr.repo.clone(), pr.number))
@@ -394,15 +395,16 @@ async fn fetch_and_store(
         let old_review_keys: HashSet<(String, i64)> = old_reviews.keys().cloned().collect();
         let to_verify = keys_needing_verification(&old_review_keys, &fetched_keys, &closed_keys);
         for (repo, number) in &to_verify {
-            match github::check_pr_state(repo, *number).await {
-                Ok(state) if state != "open" => {
-                    log!("[{}] Review PR {}/#{} is {}, removing", label, repo, number, state);
+            match github::check_review_relevance(repo, *number, user).await {
+                Ok(rel) if review_pr_is_stale(&rel.state, rel.still_requested, rel.has_review) => {
+                    log!("[{}] Review PR {}/#{} no longer relevant (state={}, requested={}, reviewed={}), removing",
+                        label, repo, number, rel.state, rel.still_requested, rel.has_review);
                     let conn = db.lock().unwrap();
                     db::delete_review_pr(&conn, repo, *number, user);
                 }
-                Ok(_) => {} // still open — search hiccup, leave it
+                Ok(_) => {} // still requested or reviewed — keep (search hiccup)
                 Err(e) => {
-                    log!("[{}] Failed to check state of {}/#{}: {}", label, repo, number, e);
+                    log!("[{}] Failed to check review relevance of {}/#{}: {}", label, repo, number, e);
                 }
             }
         }
@@ -587,6 +589,15 @@ fn keys_needing_verification(
         .collect()
 }
 
+/// Decide whether a review PR that dropped out of the search results should be
+/// removed, given its authoritative (non-search) review relationship. Remove it
+/// if the PR closed, OR it's open but you're neither a current requested reviewer
+/// nor have you left a review — i.e. you were un-requested and never reviewed it
+/// (a search hiccup, by contrast, still shows you as requested/having reviewed).
+fn review_pr_is_stale(state: &str, still_requested: bool, has_review: bool) -> bool {
+    !state.eq_ignore_ascii_case("open") || (!still_requested && !has_review)
+}
+
 /// Identify issues that were in the DB but missing from a *successful* open-issue
 /// fetch. Unlike PRs there's no closed-issue query, so absence from the complete
 /// open set is the signal; each candidate is REST-verified before deletion so a
@@ -647,6 +658,29 @@ mod tests {
         let closed = HashSet::new();
         let missing = keys_needing_verification(&old, &fetched, &closed);
         assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn review_pr_removed_when_unrequested_and_never_reviewed() {
+        // Repro for #192633: you were added as a reviewer then removed, and never
+        // reviewed. The PR is still OPEN, so the old state-only check kept it.
+        assert!(review_pr_is_stale("open", false, false));
+    }
+
+    #[test]
+    fn review_pr_kept_when_still_requested_or_reviewed() {
+        // Still a requested reviewer -> keep (a search hiccup shouldn't drop it).
+        assert!(!review_pr_is_stale("open", true, false));
+        // You left a review -> keep (reviewed-by would normally surface it).
+        assert!(!review_pr_is_stale("open", false, true));
+        assert!(!review_pr_is_stale("OPEN", true, true)); // case-insensitive state
+    }
+
+    #[test]
+    fn review_pr_removed_when_closed_regardless() {
+        // A closed PR leaves the review list no matter the relationship.
+        assert!(review_pr_is_stale("closed", true, true));
+        assert!(review_pr_is_stale("merged", false, true));
     }
 
     #[test]
