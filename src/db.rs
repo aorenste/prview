@@ -637,7 +637,9 @@ pub fn upsert_review_prs(conn: &Connection, prs: &[PrInsert], user: &str) -> Res
            drci_status = CASE WHEN excluded.drci_status != '' THEN excluded.drci_status ELSE review_prs.drci_status END,
            drci_emoji = CASE WHEN excluded.drci_emoji != '' THEN excluded.drci_emoji ELSE review_prs.drci_emoji END,
            drci_ai_verdict = CASE WHEN excluded.drci_ai_verdict != '' THEN excluded.drci_ai_verdict ELSE review_prs.drci_ai_verdict END,
-           comment_count = excluded.comment_count,
+           -- comment_count is owned by the detail fetch for review PRs (it filters
+           -- out bot comments; the light query's totalCount includes them). Do NOT
+           -- overwrite it here or bot chatter would re-inflate it and auto-unread.
            head_sha = excluded.head_sha,
            base_sha = excluded.base_sha,
            additions = excluded.additions,
@@ -685,7 +687,7 @@ fn auto_unread_with_logging(conn: &Connection, user: &str) -> Result<(), rusqlit
          FROM review_prs
          WHERE is_read = 1 AND (
             (updated_at != read_updated_at AND (
-                comment_count != read_comment_count
+                comment_count > read_comment_count
                 OR review_status != read_review_status
                 OR head_sha != read_head_sha
                 OR title != read_title
@@ -713,7 +715,7 @@ fn auto_unread_with_logging(conn: &Connection, user: &str) -> Result<(), rusqlit
         let short = |s: &str| s.chars().take(7).collect::<String>();
         let mut reasons: Vec<String> = Vec::new();
         if updated_at != read_updated_at {
-            if comment_count != read_comment_count {
+            if comment_count > read_comment_count {
                 reasons.push(format!("comment_count {}->{}", read_comment_count, comment_count));
             }
             if review_status != read_review_status {
@@ -752,7 +754,7 @@ fn auto_unread_with_logging(conn: &Connection, user: &str) -> Result<(), rusqlit
             "UPDATE review_prs SET is_read = 0
              WHERE is_read = 1 AND (
                 (updated_at != read_updated_at AND (
-                    comment_count != read_comment_count
+                    comment_count > read_comment_count
                     OR review_status != read_review_status
                     OR head_sha != read_head_sha
                     OR title != read_title
@@ -991,6 +993,10 @@ pub struct PrDetailUpdate {
     pub drci_ai_verdict: String,
     pub landing_status: String,
     pub mention_count: i64,
+    /// Human (non-bot) comment count. For review PRs this becomes the stored
+    /// comment_count (the light query's totalCount includes bots), so bot chatter
+    /// like the "Stale" bot can't auto-unread a triaged PR. Ignored for my PRs.
+    pub comment_count: i64,
 }
 
 pub fn update_pr_details(conn: &Connection, repo: &str, number: i64, user: &str, d: &PrDetailUpdate) {
@@ -1030,6 +1036,7 @@ pub fn update_review_pr_details(conn: &Connection, repo: &str, number: i64, user
             checks_queued = ?8,
             drci_updated_at = ?12,
             drci_ai_verdict = ?13,
+            comment_count = ?14,
             detail_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
             detail_for_updated_at = updated_at
          WHERE target_user = ?9 AND repo = ?10 AND number = ?11",
@@ -1040,6 +1047,7 @@ pub fn update_review_pr_details(conn: &Connection, repo: &str, number: i64, user
             user, repo, number,
             d.drci_updated_at,
             d.drci_ai_verdict,
+            d.comment_count,
         ],
     ).ok();
 }
@@ -1176,6 +1184,7 @@ mod tests {
             drci_ai_verdict: String::new(),
             landing_status: String::new(),
             mention_count,
+            comment_count: 0,
         }
     }
 
@@ -1293,6 +1302,43 @@ mod tests {
         // A genuinely new mention re-fires.
         update_review_pr_details(&conn, "pytorch/pytorch", 2, "me", &detail(2));
         assert!(is_mentioned(&conn, 2), "an additional mention should refire");
+    }
+
+    // Set the (bot-filtered) comment count via the detail path, as the fetcher does.
+    fn set_comment_count(conn: &Connection, number: i64, updated_at: &str, count: i64) {
+        upsert_review_prs(conn, &[review_insert(number, false, updated_at)], "me").unwrap();
+        let mut d = detail(0);
+        d.comment_count = count;
+        update_review_pr_details(conn, "pytorch/pytorch", number, "me", &d);
+    }
+
+    #[test]
+    fn bot_comment_does_not_auto_unread() {
+        // Repro for #186458: a "Stale" bot comment bumps updated_at but, because
+        // comment_count is now the bot-filtered human count, it stays flat — so a
+        // read PR must remain read.
+        let conn = test_db();
+        set_comment_count(&conn, 1, "U1", 2);
+        set_review_read(&conn, "pytorch/pytorch", 1, true, "me");
+        assert!(is_read(&conn, 1));
+
+        // Bot comments: updated_at advances, human comment_count still 2.
+        set_comment_count(&conn, 1, "U2", 2);
+        upsert_review_prs(&conn, &[review_insert(1, false, "U2")], "me").unwrap();
+        assert!(is_read(&conn, 1), "a bot comment must not pop a read PR unread");
+    }
+
+    #[test]
+    fn human_comment_auto_unreads() {
+        let conn = test_db();
+        set_comment_count(&conn, 2, "U1", 2);
+        set_review_read(&conn, "pytorch/pytorch", 2, true, "me");
+        assert!(is_read(&conn, 2));
+
+        // Human comments: the detail fetch bumps the human count 2 -> 3.
+        set_comment_count(&conn, 2, "U2", 3);
+        upsert_review_prs(&conn, &[review_insert(2, false, "U2")], "me").unwrap();
+        assert!(!is_read(&conn, 2), "a human comment should pop the PR unread");
     }
 
     #[test]
@@ -1455,7 +1501,7 @@ mod tests {
             checks_success: 5, checks_fail: 2, checks_pending: 0, checks_queued: 0,
             checks_running: false, drci_emoji: String::new(), drci_status: String::new(),
             drci_updated_at: String::new(), drci_ai_verdict: String::new(),
-            landing_status: String::new(), mention_count: 0,
+            landing_status: String::new(), mention_count: 0, comment_count: 0,
         };
         update_review_pr_details(&conn, "pytorch/pytorch", 1, "me", &d);
         assert_eq!(get_review_pr(&conn, "pytorch/pytorch", 1, "me").unwrap().checks_overall, "PENDING");

@@ -1298,7 +1298,31 @@ pub async fn fetch_pr_details(repo: &str, number: i64, include_landing: bool, me
         drci_ai_verdict: extract_ai_verdict_from_detail_comments(&pr.comments.nodes),
         landing_status,
         mention_count,
+        comment_count: count_human_comments(&pr.comments.nodes),
     })
+}
+
+/// Whether a comment author is a bot whose comments shouldn't re-surface a PR.
+/// Covers GitHub Apps (login ends in "[bot]") plus the pytorch/meta service
+/// accounts and the `github-actions` stale bot (which posts the "Stale" comment).
+fn is_bot_comment(login: &str) -> bool {
+    login.ends_with("[bot]")
+        || matches!(
+            login,
+            "pytorch-bot" | "pytorchmergebot" | "facebook-github-bot" | "github-actions"
+        )
+}
+
+/// Count only human (non-bot) comments. Used as the review-PR comment signal for
+/// auto-unread so bot chatter (DrCI refreshes, the "Stale" bot, merge bot) can't
+/// pop a PR you've already triaged back to unread.
+fn count_human_comments(comments: &[DetailComment]) -> i64 {
+    comments.iter()
+        .filter(|c| {
+            let login = c.author.as_ref().map(|a| a.login.as_str()).unwrap_or("");
+            !is_bot_comment(login)
+        })
+        .count() as i64
 }
 
 /// Count comments that mention `@<user>`. Word-boundary aware so `@aorenste`
@@ -1666,6 +1690,7 @@ pub async fn fetch_pr_details_batch(
             drci_ai_verdict: extract_ai_verdict_from_detail_comments(&pr.comments.nodes),
             landing_status,
             mention_count,
+            comment_count: count_human_comments(&pr.comments.nodes),
         }));
     }
 
@@ -1683,6 +1708,39 @@ mod tests {
             created_at: None,
             updated_at: None,
         }
+    }
+
+    fn authored(login: &str, body: &str) -> DetailComment {
+        DetailComment {
+            author: Some(GqlAuthor { login: login.to_string() }),
+            body: body.to_string(),
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn is_bot_comment_detects_bots_and_apps() {
+        for b in ["github-actions", "github-actions[bot]", "pytorch-bot",
+                  "pytorchmergebot", "facebook-github-bot", "dependabot[bot]"] {
+            assert!(is_bot_comment(b), "{} should be a bot", b);
+        }
+        for h in ["jansel", "aorenste", "williamsnell"] {
+            assert!(!is_bot_comment(h), "{} should be human", h);
+        }
+    }
+
+    #[test]
+    fn count_human_comments_excludes_bots() {
+        // Repro for #186458: the github-actions "Stale" comment (and other bot
+        // chatter) must not count toward the auto-unread comment signal.
+        let cs = vec![
+            authored("jansel", "please fix"),
+            authored("github-actions", "Looks like this PR hasn't been updated in a while..."),
+            authored("pytorch-bot", "<!-- ciflow-pending -->"),
+            authored("williamsnell", "lgtm"),
+        ];
+        assert_eq!(count_human_comments(&cs), 2);
     }
 
     fn drci_comment(body: &str, updated_at: Option<&str>) -> DetailComment {

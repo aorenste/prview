@@ -58,6 +58,21 @@ CLI options:
 
 Requires `gh` CLI authenticated with GitHub.
 
+### Claude: build into a separate target dir
+
+When you (Claude) run any `cargo` command in this repo, prefix it with
+`CARGO_TARGET_DIR=target/agent` — e.g. `CARGO_TARGET_DIR=target/agent cargo test`,
+`CARGO_TARGET_DIR=target/agent cargo build`. Run cargo from the repo root so the
+relative path resolves.
+
+Why: your shell and the human's build shell may use different rustc toolchains
+(mine is a conda `rust` nightly). cargo's fingerprint embeds the exact rustc
+version, so alternating toolchains on a shared `target/` recompiles every
+dependency each way. Writing your builds to `target/agent` keeps them out of the
+human's `target/debug` and `target/release` caches so they stay warm.
+`target/agent` sits under the already-gitignored `target/`, so no `.gitignore`
+change is needed.
+
 ## Dependencies
 
 actix-web (openssl), async-stream, clap (derive), hostname, humantime, openssl, rusqlite (bundled), serde/serde_json, socket2, tokio
